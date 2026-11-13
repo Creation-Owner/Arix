@@ -18,7 +18,7 @@ git clone https://github.com/YOUR_USERNAME/YOUR_ARIX_REPO.git
 cd YOUR_ARIX_REPO
 
 # 2. Install base dependencies & create your .env file:
-npm install
+npm install --legacy-peer-deps
 copy .env.example .env
 # Open .env in VS Code and set:
 #   GEMINI_API_KEY="your-key-here"
