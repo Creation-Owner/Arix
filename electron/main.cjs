@@ -156,6 +156,10 @@ async function createAppWindow() {
     return { action: 'deny' };
   });
 
+  await mainWindow.webContents.session.clearCache();
+  await mainWindow.webContents.session.clearStorageData({
+    storages: ['serviceworkers', 'cachestorage'],
+  });
   await mainWindow.loadURL(`http://127.0.0.1:${port}`);
 }
 
