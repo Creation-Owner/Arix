@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   Clock,
@@ -96,6 +96,7 @@ export default function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
   const [sendingChat, setSendingChat] = useState(false);
+  const chatAbortRef = useRef<AbortController | null>(null);
   const [liveStatus, setLiveStatus] = useState<ArixLiveStatus>(() => ({
     busy: false,
     activeNode: 'core',
@@ -485,7 +486,29 @@ export default function App() {
     if (!res.ok) throw new Error(data.error || 'Telegram send failed.');
   };
 
+  const handleCancelChat = () => {
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
+    setSendingChat(false);
+    setLiveStatus((prev) => ({
+      ...prev,
+      busy: false,
+      activeNode: 'core',
+      headline: 'Arix Core · Ready',
+      detail: 'Command cancelled',
+    }));
+  };
+
   const handleSendChat = async (message: string) => {
+    if (sendingChat) return;
+    const tempUserId = `temp-u-${Date.now()}`;
+    const optimisticUserMsg: ChatMessage = {
+      id: tempUserId,
+      role: 'user',
+      content: message,
+      timestamp: new Date().toISOString(),
+    };
+    setChatHistory((prev) => [...prev, optimisticUserMsg]);
     setSendingChat(true);
     setLiveStatus((prev) => ({
       ...prev,
@@ -494,10 +517,16 @@ export default function App() {
       headline: 'Arix Core · Thinking',
       detail: message.slice(0, 90),
     }));
+
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+    const timeoutId = window.setTimeout(() => controller.abort(), 120000);
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           message,
           auditId: selectedAuditId,
@@ -510,7 +539,7 @@ export default function App() {
         throw new Error(data.error || 'Chat request failed.');
       }
       setChatHistory((prev) => [
-        ...prev,
+        ...prev.filter((m) => m.id !== tempUserId),
         data.userMessage as ChatMessage,
         data.arixMessage as ChatMessage,
       ]);
@@ -524,8 +553,12 @@ export default function App() {
         setCustomSections(data.customSections as CustomSection[]);
       }
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Unable to reach Arix right now.';
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      const msg = isAbort
+        ? 'Request timed out or was cancelled.'
+        : err instanceof Error
+          ? err.message
+          : 'Unable to reach Arix right now.';
       setChatHistory((prev) => [
         ...prev,
         {
@@ -536,6 +569,8 @@ export default function App() {
         },
       ]);
     } finally {
+      window.clearTimeout(timeoutId);
+      chatAbortRef.current = null;
       setSendingChat(false);
     }
   };
@@ -930,6 +965,7 @@ export default function App() {
                     setSelectedConnectionId(connId);
                   }}
                   onSendMessage={handleSendChat}
+                  onCancelSending={handleCancelChat}
                   onClearChat={handleClearChat}
                   onGoToTeach={() => switchTab('teach')}
                 />

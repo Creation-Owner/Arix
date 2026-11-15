@@ -132,6 +132,7 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'arix';
   content: string;
+  thinkingSummary?: string;
   timestamp: string;
   auditId?: string;
   issueId?: string;

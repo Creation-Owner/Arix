@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, CheckCircle2, Send, Trash2, Wrench } from 'lucide-react';
+import {
+  ArrowRight,
+  Brain,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Send,
+  Trash2,
+  Wrench,
+} from 'lucide-react';
 import { ArixAvatar } from './ArixAvatar';
 import { CodeBlock } from './CodeBlock';
 import type { ChatMessage, ConnectedSite, WebsiteAudit } from '../types/arix';
@@ -21,6 +30,7 @@ interface AskArixWorkspaceProps {
     connectionId: string | null
   ) => void;
   onSendMessage: (message: string) => Promise<void>;
+  onCancelSending?: () => void;
   onClearChat: () => Promise<void>;
   onGoToTeach: () => void;
 }
@@ -72,10 +82,14 @@ export function AskArixWorkspace({
   onConsumeDraftPrompt,
   onSelectContext,
   onSendMessage,
+  onCancelSending,
   onClearChat,
   onGoToTeach,
 }: AskArixWorkspaceProps) {
   const [input, setInput] = useState('');
+  const [expandedThoughts, setExpandedThoughts] = useState<
+    Record<string, boolean>
+  >({});
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -116,10 +130,10 @@ export function AskArixWorkspace({
           `Teach Arix: Remember that ${activeConnection.name} is my primary environment.`,
         ]
       : [
+          'Create a 6-slide presentation on AI Automation with .pptx export.',
           'Create folder "projects/demo" and file "projects/demo/notes.txt" with my launch checklist.',
           'Find files matching "notes" and show me what is inside.',
           'Send a summary of my latest website audit or message to Telegram.',
-          'Inspect a GitHub repo or Cloudflare domain (e.g. "Inspect cloudflare.com DNS and headers").',
         ];
 
   return (
@@ -289,6 +303,36 @@ export function AskArixWorkspace({
                     </div>
                   )}
 
+                  {msg.role === 'arix' && msg.thinkingSummary && (
+                    <div className="mb-3 rounded-lg border border-sky-500/20 bg-[#060E1F]/80">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedThoughts((prev) => ({
+                            ...prev,
+                            [msg.id]: !prev[msg.id],
+                          }))
+                        }
+                        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-xs font-medium text-sky-300 hover:text-sky-200 cursor-pointer"
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          <Brain className="w-3.5 h-3.5 text-sky-400" />
+                          <span>Arix Thinking Process</span>
+                        </span>
+                        {expandedThoughts[msg.id] ? (
+                          <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                        ) : (
+                          <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                        )}
+                      </button>
+                      {expandedThoughts[msg.id] && (
+                        <div className="px-3 pb-3 pt-1 border-t border-slate-800/80 text-xs text-slate-300 leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto">
+                          {msg.thinkingSummary}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {msg.role === 'user' ? (
                     <p className="text-sm leading-relaxed whitespace-pre-wrap">
                       {msg.content}
@@ -326,8 +370,17 @@ export function AskArixWorkspace({
             {sending && (
               <div className="flex items-start gap-3.5">
                 <ArixAvatar size="sm" className="mt-1" />
-                <div className="bg-[#081124] border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-400">
-                  Arix is executing your request...
+                <div className="bg-[#081124] border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-300 flex items-center gap-3">
+                  <span>Arix is thinking &amp; analyzing...</span>
+                  {onCancelSending && (
+                    <button
+                      type="button"
+                      onClick={onCancelSending}
+                      className="px-2.5 py-1 text-xs font-medium text-amber-300 border border-amber-500/40 rounded-md hover:bg-amber-950/40 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -361,14 +414,24 @@ export function AskArixWorkspace({
               className="w-full px-3.5 py-2.5 text-sm bg-[#060E1F] border border-slate-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500/30 focus:border-sky-500 resize-none"
             />
           </div>
-          <button
-            type="submit"
-            disabled={sending || !input.trim()}
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-sky-500 text-slate-950 text-sm font-semibold rounded-lg hover:bg-sky-400 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer h-[44px]"
-          >
-            <Send className="w-4 h-4" />
-            <span>Send</span>
-          </button>
+          {sending && onCancelSending ? (
+            <button
+              type="button"
+              onClick={onCancelSending}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-500 text-slate-950 text-sm font-semibold rounded-lg hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer h-[44px]"
+            >
+              <span>Cancel</span>
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!input.trim()}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-sky-500 text-slate-950 text-sm font-semibold rounded-lg hover:bg-sky-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer h-[44px]"
+            >
+              <Send className="w-4 h-4" />
+              <span>Send</span>
+            </button>
+          )}
         </div>
       </form>
     </div>

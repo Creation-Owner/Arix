@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -7,9 +8,14 @@ import {
   FunctionDeclaration,
   GenerateContentResponse,
   Part,
+  ThinkingLevel,
   Type,
 } from '@google/genai';
-import { ARIX_MODEL, getGeminiClient } from './server/gemini.ts';
+import {
+  ARIX_MODEL,
+  extractAnswerAndThoughts,
+  getGeminiClient,
+} from './server/gemini.ts';
 import { analyzeHtmlSignals, scrapeWebsite } from './server/scraper.ts';
 import {
   createFileOrFolder,
@@ -55,6 +61,11 @@ import {
   editArixSourceFile,
   inspectArixSourceFile,
 } from './server/selfModify.ts';
+import {
+  buildPresentationDeck,
+  type PresentationSlideInput,
+  type PresentationThemeKey,
+} from './server/presentations.ts';
 import type {
   ArixActivityEvent,
   ArixSatelliteKey,
@@ -125,13 +136,15 @@ ${rulesBlock}
 CONNECTED PLATFORMS (WEBSITES, GITHUB, CLOUDFLARE, TELEGRAM, APIS):
 ${connectionsBlock}
 
-OPERATING PRINCIPLES:
-1. You belong exclusively to the owner. Execute every coding, debugging, file/folder, Telegram, website auditing, GitHub, Cloudflare, or analytical task directly and thoroughly.
-2. Obey all STRICT taught rules unconditionally, prioritize PREFERRED rules, and factor in ADVISORY rules.
-3. When the owner asks you to create, find, read, or delete files or folders on their computer, call the real filesystem tools (\`createFileOrFolder\`, \`findLocalFiles\`, \`readLocalFile\`, \`deleteLocalPath\`) and report the exact paths affected.
-4. When the owner asks you to send something to Telegram, call \`sendToTelegram\` using the connected Telegram bot and report confirmation.
-5. For coding tasks, deliver complete working code aligned with the owner's taught stack (${persona.techStack}) and coding style (${persona.codingStyle}).
-6. For website analysis tasks, prioritize every issue by User Experience impact (P0 Critical 85-100, P1 High 65-84, P2 Medium 40-64, P3 Low 1-39) and ground findings in real evidence.`;
+OPERATING & REASONING PRINCIPLES:
+1. You belong exclusively to the owner. Act as a senior principal engineer, UX architect, strategist, and research analyst — think carefully from first principles before responding.
+2. For every question (coding, debugging, math, architecture, strategy, writing, UX, or general knowledge), analyze root causes, edge cases, trade-offs, and constraints thoroughly, then deliver a clear, well-structured, direct answer.
+3. Obey all STRICT taught rules unconditionally, prioritize PREFERRED rules, and factor in ADVISORY rules.
+4. Only invoke workspace/external tools when the owner requests an action (files, presentations, Telegram, self-editing, GitHub/Cloudflare/site inspection) or when reading real evidence improves the answer — for pure thinking, explanation, or Q&A prompts, answer directly with depth and precision.
+5. When the owner asks you to create, find, read, or delete files or folders on their computer, call the real filesystem tools (\`createFileOrFolder\`, \`findLocalFiles\`, \`readLocalFile\`, \`deleteLocalPath\`) and report the exact paths affected.
+6. When the owner asks you to send something to Telegram, call \`sendToTelegram\` using the connected Telegram bot and report confirmation.
+7. For coding tasks, deliver complete working code aligned with the owner's taught stack (${persona.techStack}) and coding style (${persona.codingStyle}).
+8. For website analysis tasks, prioritize every issue by User Experience impact (P0 Critical 85-100, P1 High 65-84, P2 Medium 40-64, P3 Low 1-39) and ground findings in real evidence.`;
 }
 
 function formatGeminiError(err: unknown): { status: number; message: string } {
@@ -148,6 +161,13 @@ function formatGeminiError(err: unknown): { status: number; message: string } {
       status: 403,
       message:
         'Permission denied by Gemini API. Please check your API key in Settings > Secrets.',
+    };
+  }
+  if (raw.includes('NOT_FOUND') || raw.includes('404')) {
+    return {
+      status: 404,
+      message:
+        'Requested Gemini model was not found or is unsupported. Verify ARIX_MODEL in server/gemini.ts.',
     };
   }
   if (raw.includes('RESOURCE_EXHAUSTED') || raw.includes('429')) {
@@ -480,6 +500,100 @@ const editArixSourceFileDeclaration: FunctionDeclaration = {
   },
 };
 
+const createPresentationDeclaration: FunctionDeclaration = {
+  name: 'createPresentation',
+  description:
+    'Create a real PowerPoint (.pptx) presentation saved to the computer workspace (presentations/<file>.pptx) AND open an interactive Slide Deck viewer inside Arix with speaker notes, keyboard navigation, fullscreen mode, and a Download .pptx button.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      title: {
+        type: Type.STRING,
+        description: 'Presentation title.',
+      },
+      subtitle: {
+        type: Type.STRING,
+        description: 'Optional subtitle or presenter line.',
+      },
+      theme: {
+        type: Type.STRING,
+        description:
+          'Visual palette: "midnight_blue", "clean_light", "executive_slate", or "emerald_tech".',
+      },
+      fileName: {
+        type: Type.STRING,
+        description: 'Optional .pptx file name (e.g., "ai-automation.pptx").',
+      },
+      placement: {
+        type: Type.STRING,
+        description:
+          'Where to show interactive viewer inside Arix: "both" (default), "sidebar_tab", or "main_page".',
+      },
+      saveInteractiveSection: {
+        type: Type.BOOLEAN,
+        description:
+          'Whether to create an interactive Slide Deck section inside Arix UI (default true).',
+      },
+      slides: {
+        type: Type.ARRAY,
+        description: 'Ordered list of slides for the presentation.',
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            layout: {
+              type: Type.STRING,
+              description:
+                'One of: "title", "bullets", "two_column", "metrics", "quote".',
+            },
+            heading: {
+              type: Type.STRING,
+              description: 'Slide headline.',
+            },
+            subheading: {
+              type: Type.STRING,
+              description: 'Optional short subtitle on the slide.',
+            },
+            bullets: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: 'Concise bullet points for the slide.',
+            },
+            leftHeading: { type: Type.STRING },
+            leftItems: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            rightHeading: { type: Type.STRING },
+            rightItems: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            metrics: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  label: { type: Type.STRING },
+                  value: { type: Type.STRING },
+                  detail: { type: Type.STRING },
+                },
+              },
+            },
+            quote: { type: Type.STRING },
+            quoteAuthor: { type: Type.STRING },
+            notes: {
+              type: Type.STRING,
+              description: 'Speaker notes for the presenter.',
+            },
+          },
+          required: ['heading'],
+        },
+      },
+    },
+    required: ['title', 'slides'],
+  },
+};
+
 const sseClients = new Set<express.Response>();
 const recentActivityEvents: ArixActivityEvent[] = [];
 
@@ -524,6 +638,7 @@ function mapToolToNode(toolName: string): ArixSatelliteKey {
     case 'createSelfSection':
     case 'updateSelfSection':
     case 'deleteSelfSection':
+    case 'createPresentation':
       return 'text';
     case 'sendToTelegram':
       return 'network';
@@ -620,6 +735,11 @@ function formatToolStartDetail(
         title: 'Memory · Learning rule',
         detail: `Saving "${String(args.title || 'Owner Instruction')}"...`,
       };
+    case 'createPresentation':
+      return {
+        title: 'Presentation · Building slides',
+        detail: `Creating "${String(args.title || 'Presentation')}" (.pptx + viewer)...`,
+      };
     default:
       return {
         title: 'Arix · Running tool',
@@ -646,6 +766,8 @@ function formatToolDoneTitle(toolName: string): string {
       return 'Arix Self-Build · Updated';
     case 'deleteSelfSection':
       return 'Arix Self-Build · Removed';
+    case 'createPresentation':
+      return 'Presentation · Ready (.pptx)';
     case 'inspectArixSourceFile':
       return 'Self-Code · Read';
     case 'editArixSourceFile':
@@ -665,6 +787,35 @@ async function startServer() {
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, ai: 'Arix' });
+  });
+
+  app.get('/api/presentations/:fileName', (req, res) => {
+    try {
+      const safeName = path.basename(String(req.params.fileName || ''));
+      if (!safeName.toLowerCase().endsWith('.pptx')) {
+        res.status(400).json({ error: 'Only .pptx files can be downloaded.' });
+        return;
+      }
+      const rootDir = getActiveComputerRoot();
+      const presDir = path.resolve(rootDir, 'presentations');
+      const fullPath = path.resolve(presDir, safeName);
+      if (!fullPath.startsWith(presDir) || !fs.existsSync(fullPath)) {
+        res.status(404).json({ error: 'Presentation file not found.' });
+        return;
+      }
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+      );
+      res.download(fullPath, safeName);
+    } catch (err) {
+      res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Unable to download presentation.',
+      });
+    }
   });
 
   app.get('/api/activity/stream', (req, res) => {
@@ -1285,6 +1436,9 @@ async function startServer() {
         contents: { parts },
         config: {
           systemInstruction,
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.HIGH,
+          },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -1549,6 +1703,7 @@ AVAILABLE LIVE TOOLS:
 - \`writeGitHubFile\`: Create or update a file inside a connected GitHub repository (use connected GitHub repo automatically when the owner asks to add/commit to "my GitHub").
 - \`inspectCloudflareDomain\`: Check Cloudflare DNS records, edge headers, and zone status.
 - \`createSelfSection\`, \`updateSelfSection\`, \`deleteSelfSection\`: Add, update, or remove live interactive sections/tabs inside Arix itself! Whenever the owner teaches you coding or asks you to change yourself or create a section inside Arix, call \`createSelfSection\` with complete, dark-navy styled HTML/CSS/JS (#060E1F background, #0B152B cards, #38BDF8 accents, #f1f5f9 text) so the new section appears immediately in Arix's UI.
+- \`createPresentation\`: Build complete multi-slide PowerPoint (.pptx) presentations saved to \`presentations/<file>.pptx\` AND automatically launch an interactive slide deck viewer inside Arix (with keyboard arrow navigation, fullscreen mode, speaker notes, and Download .pptx). Follow any taught presentation rules strictly!
 - \`inspectArixSourceFile\`, \`editArixSourceFile\`: Read and modify Arix's own project source files (src/, server/, public/, electron/) with automatic backup.
 
 EXISTING SELF-BUILT SECTIONS INSIDE ARIX:
@@ -1572,6 +1727,7 @@ ${
             createSelfSectionDeclaration,
             updateSelfSectionDeclaration,
             deleteSelfSectionDeclaration,
+            createPresentationDeclaration,
             inspectArixSourceFileDeclaration,
             editArixSourceFileDeclaration,
             inspectConnectedSiteDeclaration,
@@ -1589,28 +1745,47 @@ ${
 
       const newlyLearnedRules: TaughtRule[] = [];
       const toolsInvoked: string[] = [];
+      const collectedThoughts: string[] = [];
       let finalReply = '';
       let lastActiveNode: ArixSatelliteKey = 'core';
 
       emitArixActivity({
         phase: 'thinking',
         node: 'core',
-        title: 'Arix Core · Thinking',
+        title: 'Arix Core · Deep Reasoning',
         detail: cleanMessage.slice(0, 90),
       });
 
-      for (let step = 0; step < 4; step++) {
+      for (let step = 0; step < 8; step++) {
         const response = await ai.models.generateContent({
           model: ARIX_MODEL,
           contents: conversationContents,
-          config: { systemInstruction, tools },
+          config: {
+            systemInstruction,
+            tools,
+            thinkingConfig: {
+              thinkingLevel: ThinkingLevel.HIGH,
+              includeThoughts: true,
+            },
+          },
         });
+
+        const extracted = extractAnswerAndThoughts(response);
+        if (extracted.thoughts) {
+          collectedThoughts.push(extracted.thoughts);
+          emitArixActivity({
+            phase: 'thinking',
+            node: 'core',
+            title: 'Arix Core · Analyzing',
+            detail: extracted.thoughts.split('\n')[0].slice(0, 110),
+          });
+        }
 
         const previousContent = response.candidates?.[0]?.content;
         const fnCalls = response.functionCalls;
 
         if (!fnCalls || fnCalls.length === 0) {
-          finalReply = response.text || finalReply;
+          finalReply = extracted.text || response.text || finalReply;
           break;
         }
 
@@ -1861,6 +2036,73 @@ ${
                   response: { ok: deleted, idOrTitle },
                 },
               });
+            } else if (toolName === 'createPresentation') {
+              const title = String(args.title || 'Arix Presentation').trim();
+              const subtitle = args.subtitle
+                ? String(args.subtitle).trim()
+                : undefined;
+              const rawTheme = String(args.theme || 'midnight_blue');
+              const theme: PresentationThemeKey =
+                rawTheme === 'clean_light' ||
+                rawTheme === 'executive_slate' ||
+                rawTheme === 'emerald_tech'
+                  ? rawTheme
+                  : 'midnight_blue';
+              const slides = Array.isArray(args.slides)
+                ? (args.slides as PresentationSlideInput[])
+                : [];
+              const presResult = await buildPresentationDeck({
+                title,
+                subtitle,
+                author: state.persona.ownerName || 'Owner',
+                theme,
+                fileName: args.fileName ? String(args.fileName) : undefined,
+                computerRoot: rootDir,
+                slides,
+              });
+
+              let sectionId: string | undefined;
+              if (args.saveInteractiveSection !== false) {
+                const rawPlacement = String(args.placement || 'both');
+                const placement =
+                  rawPlacement === 'sidebar_tab' ||
+                  rawPlacement === 'main_page'
+                    ? rawPlacement
+                    : 'both';
+                const section = addCustomSection({
+                  title: `Deck: ${presResult.title}`,
+                  navLabel: presResult.title.slice(0, 20),
+                  description: `${presResult.slideCount} slides · ${presResult.relativePath}`,
+                  placement,
+                  htmlCode: presResult.interactiveHtml,
+                });
+                sectionId = section.id;
+              }
+
+              emitArixActivity({
+                phase: 'tool_done',
+                node: 'text',
+                toolName,
+                title: `Presentation · ${presResult.slideCount} slides ready`,
+                detail: `${presResult.relativePath} created`,
+              });
+
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: {
+                    ok: true,
+                    title: presResult.title,
+                    theme: presResult.theme,
+                    slideCount: presResult.slideCount,
+                    fileName: presResult.fileName,
+                    relativePath: presResult.relativePath,
+                    downloadUrl: presResult.downloadUrl,
+                    sectionId,
+                  },
+                },
+              });
             } else if (toolName === 'inspectArixSourceFile') {
               const inspected = inspectArixSourceFile(
                 String(args.filePath || '.')
@@ -2097,7 +2339,8 @@ ${
               toolName !== 'writeGitHubFile' &&
               toolName !== 'inspectCloudflareDomain' &&
               toolName !== 'sendToTelegram' &&
-              toolName !== 'editArixSourceFile'
+              toolName !== 'editArixSourceFile' &&
+              toolName !== 'createPresentation'
             ) {
               emitArixActivity({
                 phase: 'tool_done',
@@ -2141,12 +2384,50 @@ ${
         ];
       }
 
+      if (!finalReply && toolsInvoked.length > 0) {
+        try {
+          const synthesisResp = await ai.models.generateContent({
+            model: ARIX_MODEL,
+            contents: [
+              ...conversationContents,
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: 'Provide a clear, thorough final analysis and answer to the owner summarizing what was done, exact results/paths/links, and next steps.',
+                  },
+                ],
+              },
+            ],
+            config: {
+              systemInstruction,
+              thinkingConfig: {
+                thinkingLevel: ThinkingLevel.HIGH,
+                includeThoughts: true,
+              },
+            },
+          });
+          const synthExtracted = extractAnswerAndThoughts(synthesisResp);
+          if (synthExtracted.thoughts) {
+            collectedThoughts.push(synthExtracted.thoughts);
+          }
+          finalReply = synthExtracted.text || synthesisResp.text || '';
+        } catch {
+          // Fall back to deterministic summary below if synthesis fails
+        }
+      }
+
       if (!finalReply) {
         finalReply =
           newlyLearnedRules.length > 0
             ? `Understood — I learned "${newlyLearnedRules[0].title}" and saved it permanently.`
             : 'Task completed. Let me know what you want me to build, inspect, or run next.';
       }
+
+      const thinkingSummary =
+        collectedThoughts.length > 0
+          ? collectedThoughts.join('\n\n').trim()
+          : undefined;
 
       const appliedRulesUsed = activeRules.map((r) => r.title);
       const userMsg: ChatMessage = {
@@ -2162,6 +2443,7 @@ ${
         id: `msg-${Date.now()}-a`,
         role: 'arix',
         content: finalReply,
+        thinkingSummary,
         timestamp: new Date().toISOString(),
         auditId: targetAudit?.id,
         issueId: targetIssue?.id,

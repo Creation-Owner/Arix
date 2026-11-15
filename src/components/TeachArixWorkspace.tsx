@@ -91,6 +91,20 @@ const CURRICULUM_PRESETS: Array<{
     category: 'owner_directive',
     weight: 'strict',
   },
+  {
+    title: 'Executive presentation deck structure',
+    instruction:
+      'When making presentations, use createPresentation with: 1) Title cover, 2) Problem or Context, 3) Two-column Solution/Comparison, 4) Key Metrics cards, 5) Takeaway Quote or Case Insight, and 6) Clear Next Steps — with concise bullets and speaker notes.',
+    category: 'automation',
+    weight: 'strict',
+  },
+  {
+    title: 'Scannable slide formatting & .pptx export',
+    instruction:
+      'Keep every slide scannable (max 5 bullets per slide, short bold headings, detailed talking points placed in speaker notes) and export both a PowerPoint .pptx file and an interactive preview deck.',
+    category: 'automation',
+    weight: 'preferred',
+  },
 ];
 
 export function TeachArixWorkspace({

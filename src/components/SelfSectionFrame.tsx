@@ -61,10 +61,14 @@ export function SelfSectionFrame({
       }
     </style>`;
 
+    const baseOrigin =
+      typeof window !== 'undefined' ? window.location.origin : '';
+    const baseTag = baseOrigin ? `<base href="${baseOrigin}/" />` : '';
+
     if (hasHtmlWrapper) {
-      return raw.replace(/<\/head>/i, `${themeStyle}</head>`);
+      return raw.replace(/<\/head>/i, `${baseTag}${themeStyle}</head>`);
     }
-    return `<!doctype html><html><head><meta charset="utf-8" />${themeStyle}</head><body>${raw}</body></html>`;
+    return `<!doctype html><html><head><meta charset="utf-8" />${baseTag}${themeStyle}</head><body>${raw}</body></html>`;
   }, [section.htmlCode]);
 
   return (
@@ -130,9 +134,10 @@ export function SelfSectionFrame({
         <iframe
           title={section.title}
           srcDoc={srcDoc}
-          sandbox="allow-scripts allow-forms"
+          allowFullScreen
+          sandbox="allow-scripts allow-forms allow-downloads allow-popups"
           className={`w-full border-0 bg-[#060E1F] ${
-            compact ? 'h-[340px]' : 'h-[560px]'
+            compact ? 'h-[420px]' : 'h-[640px]'
           }`}
         />
       )}

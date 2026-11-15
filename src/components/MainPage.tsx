@@ -80,6 +80,7 @@ export function MainPage({
   };
 
   const quickCommands = [
+    'Create a 6-slide presentation on AI Automation with .pptx export',
     'Create a Quick Tasks & Timer section in yourself',
     'Add arix-notes.md to my GitHub',
     'Create folder "demo-project" with README.txt inside',
