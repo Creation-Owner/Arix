@@ -18,6 +18,8 @@ export interface TaughtRule {
   source: 'manual' | 'chat';
 }
 
+export type ArixVoiceName = 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
+
 export interface PersonaSettings {
   ownerName: string;
   primaryGoal: string;
@@ -25,6 +27,8 @@ export interface PersonaSettings {
   codingStyle: string;
   tonePreference: string;
   customDirective: string;
+  voiceName?: ArixVoiceName;
+  autoSpeak?: boolean;
 }
 
 export type ConnectedSiteType =

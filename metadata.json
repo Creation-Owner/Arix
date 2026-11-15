@@ -1,6 +1,6 @@
 {
   "name": "Lisa - AI Website & UX Impact Analyzer",
   "description": "Meet Lisa, your personal AI website auditor and UX specialist that detects errors, evaluates usability impact, prioritizes fixes, and generates code solutions.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

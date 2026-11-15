@@ -37,6 +37,8 @@ const DEFAULT_PERSONA: PersonaSettings = {
   codingStyle: 'Clean, modular, production-ready code with zero placeholder stubs',
   tonePreference: 'Direct, precise, and solution-first',
   customDirective: '',
+  voiceName: 'Kore',
+  autoSpeak: false,
 };
 
 const DEFAULT_RULES: TaughtRule[] = [

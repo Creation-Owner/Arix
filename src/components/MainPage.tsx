@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -13,19 +14,38 @@ import {
   FileText,
   Globe,
   Link2,
+  Loader2,
+  Mic,
+  MicOff,
   MonitorDown,
   Paperclip,
   Send,
   Sparkles,
+  Square,
+  Volume2,
   Wrench,
   X,
 } from 'lucide-react';
 import { ArixCore3D } from './ArixCore3D';
 import { SelfSectionFrame } from './SelfSectionFrame';
 import { filesToChatAttachments } from '../utils/imageAttachment';
+import {
+  ARIX_VOICES,
+  getVoicePlaybackState,
+  playArixSpeech,
+  subscribeVoicePlayback,
+  type VoicePlaybackState,
+} from '../utils/voicePlayer';
+import {
+  isVoiceRecordingSupported,
+  startVoiceRecording,
+  transcribeVoiceAudio,
+  type VoiceRecorderSession,
+} from '../utils/voiceRecorder';
 import type {
   ArixLiveStatus,
   ArixSatelliteKey,
+  ArixVoiceName,
   ChatAttachment,
   ChatMessage,
   CustomSection,
@@ -37,6 +57,7 @@ interface MainPageProps {
   auditCount: number;
   chatCount: number;
   ownerName: string;
+  voiceName: ArixVoiceName;
   liveStatus: ArixLiveStatus;
   sendingCommand: boolean;
   latestArixReply: ChatMessage | null;
@@ -45,6 +66,7 @@ interface MainPageProps {
     message: string,
     attachments?: ChatAttachment[]
   ) => Promise<void>;
+  onChangeVoice: (voiceName: ArixVoiceName) => Promise<void>;
   onDeleteSection: (id: string) => Promise<void>;
   onAskArixToModifySection: (section: CustomSection) => void;
   onOpenDesktopAppModal: () => void;
@@ -59,11 +81,13 @@ export function MainPage({
   auditCount,
   chatCount,
   ownerName,
+  voiceName,
   liveStatus,
   sendingCommand,
   latestArixReply,
   customSections,
   onSendCommand,
+  onChangeVoice,
   onDeleteSection,
   onAskArixToModifySection,
   onOpenDesktopAppModal,
@@ -71,7 +95,104 @@ export function MainPage({
 }: MainPageProps) {
   const [commandInput, setCommandInput] = useState('');
   const [pendingImages, setPendingImages] = useState<ChatAttachment[]>([]);
+  const [listening, setListening] = useState(false);
+  const [transcribingVoice, setTranscribingVoice] = useState(false);
+  const [voiceInputError, setVoiceInputError] = useState<string | null>(null);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const [voiceState, setVoiceState] = useState<VoicePlaybackState>(() =>
+    getVoicePlaybackState()
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const recorderRef = useRef<VoiceRecorderSession | null>(null);
+
+  const voiceSupported = isVoiceRecordingSupported();
+
+  useEffect(() => {
+    return subscribeVoicePlayback(setVoiceState);
+  }, []);
+
+  useEffect(() => {
+    if (!listening) {
+      setRecordSeconds(0);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setRecordSeconds((s) => s + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [listening]);
+
+  useEffect(() => {
+    return () => {
+      recorderRef.current?.cancel();
+      recorderRef.current = null;
+    };
+  }, []);
+
+  const startListening = async () => {
+    setVoiceInputError(null);
+    try {
+      const session = await startVoiceRecording();
+      recorderRef.current = session;
+      setListening(true);
+    } catch (err) {
+      setVoiceInputError(
+        err instanceof Error ? err.message : 'Unable to start microphone.'
+      );
+    }
+  };
+
+  const finishListening = async (autoSend: boolean) => {
+    const session = recorderRef.current;
+    recorderRef.current = null;
+    setListening(false);
+    if (!session) return;
+
+    setTranscribingVoice(true);
+    setVoiceInputError(null);
+    try {
+      const audio = await session.stop();
+      const transcript = await transcribeVoiceAudio(audio);
+      if (!transcript) {
+        setVoiceInputError(
+          'No speech detected. Try speaking closer to the microphone.'
+        );
+        return;
+      }
+      if (autoSend) {
+        const combined = commandInput.trim()
+          ? `${commandInput.trim()} ${transcript}`
+          : transcript;
+        const imagesToSend = pendingImages;
+        setCommandInput('');
+        setPendingImages([]);
+        await onSendCommand(combined, imagesToSend);
+      } else {
+        setCommandInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+      }
+    } catch (err) {
+      setVoiceInputError(
+        err instanceof Error ? err.message : 'Voice command failed.'
+      );
+    } finally {
+      setTranscribingVoice(false);
+    }
+  };
+
+  const cancelListening = () => {
+    recorderRef.current?.cancel();
+    recorderRef.current = null;
+    setListening(false);
+  };
+
+  const toggleVoiceInput = () => {
+    if (transcribingVoice) return;
+    if (listening) {
+      void finishListening(true);
+    } else {
+      void startListening();
+    }
+  };
 
   const handleAttachFiles = async (files: FileList | File[] | null) => {
     if (!files || files.length === 0) return;
@@ -271,6 +392,70 @@ export function MainPage({
             </div>
           )}
 
+          {(listening || transcribingVoice || voiceInputError) && (
+            <div
+              className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg border text-xs ${
+                voiceInputError
+                  ? 'bg-red-950/35 border-red-500/40 text-red-300'
+                  : 'bg-[#060E1F] border-sky-500/40 text-slate-200'
+              }`}
+            >
+              {voiceInputError ? (
+                <>
+                  <span>{voiceInputError}</span>
+                  <button
+                    type="button"
+                    onClick={() => setVoiceInputError(null)}
+                    className="text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </>
+              ) : transcribingVoice ? (
+                <div className="flex items-center gap-2 text-sky-300">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Transcribing voice command with Gemini...</span>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                    <span className="font-medium text-white">
+                      Listening · {Math.floor(recordSeconds / 60)}:
+                      {String(recordSeconds % 60).padStart(2, '0')}
+                    </span>
+                    <span className="text-slate-400 hidden sm:inline">
+                      Speak your command clearly
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => void finishListening(true)}
+                      className="px-2.5 py-1 bg-sky-500 text-slate-950 font-semibold rounded hover:bg-sky-400 cursor-pointer"
+                    >
+                      Send Voice
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void finishListening(false)}
+                      className="px-2.5 py-1 bg-slate-800 text-slate-200 rounded hover:bg-slate-700 cursor-pointer"
+                    >
+                      To Box
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelListening}
+                      className="px-2 py-1 text-slate-400 hover:text-white cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           <form
             onSubmit={handleSubmit}
             className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3"
@@ -283,16 +468,48 @@ export function MainPage({
               onChange={handleFileChange}
               className="hidden"
             />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={sendingCommand || pendingImages.length >= 4}
-              title="Attach image, PDF, or code/text file (or Ctrl+V)"
-              aria-label="Attach image, PDF, or file to command"
-              className="inline-flex items-center justify-center px-3.5 py-3 bg-[#060E1F] border border-slate-700 text-slate-200 hover:text-sky-300 hover:border-sky-500/60 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Paperclip className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={sendingCommand || pendingImages.length >= 4}
+                title="Attach image, PDF, or code/text file (or Ctrl+V)"
+                aria-label="Attach image, PDF, or file to command"
+                className="inline-flex items-center justify-center px-3.5 py-3 bg-[#060E1F] border border-slate-700 text-slate-200 hover:text-sky-300 hover:border-sky-500/60 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
+              {voiceSupported && (
+                <button
+                  type="button"
+                  onClick={toggleVoiceInput}
+                  disabled={sendingCommand || transcribingVoice}
+                  title={
+                    listening
+                      ? 'Stop & send voice command'
+                      : 'Give a command by voice'
+                  }
+                  aria-label={
+                    listening
+                      ? 'Stop and send voice command'
+                      : 'Speak voice command'
+                  }
+                  className={`inline-flex items-center justify-center px-3.5 py-3 border rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    listening
+                      ? 'bg-red-500/20 border-red-500 text-red-300'
+                      : 'bg-[#060E1F] border-slate-700 text-slate-200 hover:text-sky-300 hover:border-sky-500/60 disabled:opacity-40'
+                  }`}
+                >
+                  {transcribingVoice ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+                  ) : listening ? (
+                    <MicOff className="w-4 h-4" />
+                  ) : (
+                    <Mic className="w-4 h-4" />
+                  )}
+                </button>
+              )}
+            </div>
             <label htmlFor="main-arix-command" className="sr-only">
               Command Arix directly
             </label>
@@ -383,17 +600,66 @@ export function MainPage({
                     recentEvents.length > 0 ? 'lg:col-span-7' : 'lg:col-span-12'
                   } bg-[#060E1F] border border-slate-800 rounded-xl p-4 space-y-2`}
                 >
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs font-semibold text-white">
                       Latest Arix Response
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => onNavigate('ask')}
-                      className="text-xs text-sky-400 hover:underline cursor-pointer"
-                    >
-                      Continue in Chat
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <select
+                        aria-label="Select Arix voice"
+                        value={voiceName}
+                        onChange={(e) =>
+                          void onChangeVoice(e.target.value as ArixVoiceName)
+                        }
+                        className="px-2 py-1 text-[11px] bg-[#0B152B] border border-slate-700 text-slate-200 rounded-md cursor-pointer"
+                      >
+                        {ARIX_VOICES.map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.label} ({v.tagline})
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void playArixSpeech({
+                            id: latestArixReply.id,
+                            text: latestArixReply.content,
+                            voiceName,
+                          })
+                        }
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md border cursor-pointer ${
+                          voiceState.playingId === latestArixReply.id ||
+                          voiceState.loadingId === latestArixReply.id
+                            ? 'bg-sky-500 text-slate-950 border-sky-400 font-semibold'
+                            : 'bg-[#0B152B] border-slate-700 text-slate-200 hover:border-sky-500/60'
+                        }`}
+                      >
+                        {voiceState.loadingId === latestArixReply.id ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            <span>Loading</span>
+                          </>
+                        ) : voiceState.playingId === latestArixReply.id ? (
+                          <>
+                            <Square className="w-3 h-3 fill-current" />
+                            <span>Stop</span>
+                          </>
+                        ) : (
+                          <>
+                            <Volume2 className="w-3 h-3" />
+                            <span>Speak</span>
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onNavigate('ask')}
+                        className="text-xs text-sky-400 hover:underline cursor-pointer"
+                      >
+                        Continue in Chat
+                      </button>
+                    </div>
                   </div>
                   <p className="text-xs sm:text-sm text-slate-200 leading-relaxed whitespace-pre-wrap line-clamp-4">
                     {latestArixReply.content}

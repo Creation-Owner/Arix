@@ -31,6 +31,7 @@ import type {
   ArixLiveStatus,
   ArixSatelliteKey,
   ArixStatePayload,
+  ArixVoiceName,
   ChatAttachment,
   ChatMessage,
   ConnectedSite,
@@ -43,6 +44,7 @@ import type {
   TaughtRule,
   WebsiteAudit,
 } from './types/arix';
+import { playArixSpeech } from './utils/voicePlayer';
 
 type BuiltInTab =
   | 'home'
@@ -82,6 +84,8 @@ export default function App() {
     codingStyle: '',
     tonePreference: '',
     customDirective: '',
+    voiceName: 'Kore',
+    autoSpeak: false,
   });
   const [audits, setAudits] = useState<WebsiteAudit[]>([]);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -357,6 +361,23 @@ export default function App() {
     setPersona(saved);
   };
 
+  const handleUpdateVoiceSettings = async (patch: {
+    voiceName?: ArixVoiceName;
+    autoSpeak?: boolean;
+  }) => {
+    const nextPersona: PersonaSettings = { ...persona, ...patch };
+    setPersona(nextPersona);
+    const res = await fetch('/api/persona', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (res.ok) {
+      const saved = (await res.json()) as PersonaSettings;
+      setPersona(saved);
+    }
+  };
+
   const handleUpdateComputerRoot = async (rootPath: string) => {
     const res = await fetch('/api/computer/root', {
       method: 'PUT',
@@ -565,6 +586,14 @@ export default function App() {
         data.userMessage as ChatMessage,
         data.arixMessage as ChatMessage,
       ]);
+      const reply = data.arixMessage as ChatMessage | undefined;
+      if (persona.autoSpeak && reply?.content) {
+        void playArixSpeech({
+          id: reply.id,
+          text: reply.content,
+          voiceName: persona.voiceName || 'Kore',
+        });
+      }
       if (
         Array.isArray(data.newlyLearnedRules) &&
         data.newlyLearnedRules.length > 0
@@ -907,6 +936,7 @@ export default function App() {
                   auditCount={audits.length}
                   chatCount={chatHistory.length}
                   ownerName={persona.ownerName}
+                  voiceName={persona.voiceName || 'Kore'}
                   liveStatus={liveStatus}
                   sendingCommand={sendingChat}
                   latestArixReply={
@@ -915,6 +945,9 @@ export default function App() {
                   }
                   customSections={customSections}
                   onSendCommand={handleSendChat}
+                  onChangeVoice={(voiceName) =>
+                    handleUpdateVoiceSettings({ voiceName })
+                  }
                   onDeleteSection={handleDeleteSection}
                   onAskArixToModifySection={handleAskArixToModifySection}
                   onOpenDesktopAppModal={() => setDesktopModalOpen(true)}
@@ -979,10 +1012,13 @@ export default function App() {
                   selectedConnectionId={selectedConnectionId}
                   sending={sendingChat}
                   reasoningMode={reasoningMode}
+                  voiceName={persona.voiceName || 'Kore'}
+                  autoSpeak={Boolean(persona.autoSpeak)}
                   activeRuleCount={activeRules.length}
                   draftPrompt={draftChatPrompt}
                   onConsumeDraftPrompt={() => setDraftChatPrompt(null)}
                   onChangeReasoningMode={setReasoningMode}
+                  onUpdateVoiceSettings={handleUpdateVoiceSettings}
                   onSelectContext={(auditId, issueId, connId) => {
                     setSelectedAuditId(auditId);
                     setFocusedIssueId(issueId);

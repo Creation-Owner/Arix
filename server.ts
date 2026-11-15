@@ -2820,6 +2820,188 @@ ${
     res.json({ cleared: true });
   });
 
+  // Gemini TTS Speech Generation (gemini-3.8-flash-lite-tts)
+  app.post('/api/voice/speak', async (req, res) => {
+    try {
+      const { text, voiceName: rawVoice, style } = req.body ?? {};
+      const validVoices = new Set([
+        'Kore',
+        'Puck',
+        'Charon',
+        'Fenrir',
+        'Zephyr',
+      ]);
+      const voiceName = validVoices.has(String(rawVoice))
+        ? String(rawVoice)
+        : 'Kore';
+
+      const spokenText = String(text || '')
+        .replace(/```[\s\S]*?```/g, ' I have included the code in the chat. ')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/^#{1,6}\s+/gm, '')
+        .replace(/[*_~>]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 2000);
+
+      if (!spokenText) {
+        res.status(400).json({ error: 'No speakable text provided.' });
+        return;
+      }
+
+      const ai = getGeminiClient();
+      emitArixActivity({
+        phase: 'tool_start',
+        node: 'text',
+        toolName: 'voiceSpeak',
+        title: `Voice · ${voiceName}`,
+        detail: `Generating speech (${spokenText.slice(0, 60)}...)`,
+      });
+
+      const ttsResponse = await ai.models.generateContent({
+        model: 'gemini-3.8-flash-lite-tts',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: spokenText,
+                speechMetadata: {
+                  style:
+                    typeof style === 'string' && style.trim()
+                      ? style.trim()
+                      : 'Clear, natural, expressive personal AI assistant',
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName },
+            },
+          },
+        },
+      });
+
+      const parts = ttsResponse.candidates?.[0]?.content?.parts || [];
+      let audioBase64 = '';
+      for (const p of parts) {
+        if (p.inlineData?.data) {
+          audioBase64 = p.inlineData.data;
+          break;
+        }
+      }
+
+      if (!audioBase64) {
+        throw new Error('Gemini TTS did not return audio data.');
+      }
+
+      emitArixActivity({
+        phase: 'done',
+        node: 'text',
+        title: `Voice · ${voiceName} ready`,
+        detail: 'Speech audio generated',
+      });
+
+      res.json({
+        audioBase64,
+        mimeType: 'audio/wav',
+        voiceName,
+      });
+    } catch (err) {
+      const formatted = formatGeminiError(err);
+      emitArixActivity({
+        phase: 'error',
+        node: 'text',
+        title: 'Voice · Error',
+        detail: formatted.message,
+      });
+      res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // Gemini Audio Transcription for Voice Commands (gemini-3.5-transcribe)
+  app.post('/api/voice/transcribe', async (req, res) => {
+    try {
+      const { audioBase64, mimeType } = req.body ?? {};
+      const cleanBase64 = String(audioBase64 || '')
+        .replace(/^data:[^;]+;base64,/, '')
+        .trim();
+
+      if (!cleanBase64) {
+        res.status(400).json({ error: 'No audio data provided.' });
+        return;
+      }
+
+      const rawMime = String(mimeType || 'audio/webm')
+        .split(';')[0]
+        .trim()
+        .toLowerCase();
+      const allowedMimes = new Set([
+        'audio/webm',
+        'audio/wav',
+        'audio/mp3',
+        'audio/mpeg',
+        'audio/mp4',
+        'audio/ogg',
+        'audio/aac',
+        'audio/flac',
+      ]);
+      const safeMime = allowedMimes.has(rawMime) ? rawMime : 'audio/webm';
+
+      const ai = getGeminiClient();
+      emitArixActivity({
+        phase: 'tool_start',
+        node: 'text',
+        toolName: 'voiceTranscribe',
+        title: 'Voice · Listening',
+        detail: 'Transcribing your voice command...',
+      });
+
+      const transcribeRes = await ai.models.generateContent({
+        model: 'gemini-3.5-transcribe',
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: safeMime,
+                data: cleanBase64,
+              },
+            },
+            {
+              text: 'Transcribe the user spoken voice command accurately into clean plain text without adding commentary, timestamps, or quotation marks. If no speech is audible, return an empty string.',
+            },
+          ],
+        },
+      });
+
+      const transcript = (transcribeRes.text || '').trim();
+      emitArixActivity({
+        phase: 'done',
+        node: 'text',
+        title: 'Voice · Transcribed',
+        detail: transcript
+          ? transcript.slice(0, 75)
+          : 'No speech detected in audio',
+      });
+
+      res.json({ transcript });
+    } catch (err) {
+      const formatted = formatGeminiError(err);
+      emitArixActivity({
+        phase: 'error',
+        node: 'text',
+        title: 'Voice · Transcription Error',
+        detail: formatted.message,
+      });
+      res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
   const httpServer = http.createServer(app);
 
   if (process.env.NODE_ENV !== 'production') {
