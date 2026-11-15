@@ -31,11 +31,13 @@ import type {
   ArixLiveStatus,
   ArixSatelliteKey,
   ArixStatePayload,
+  ChatAttachment,
   ChatMessage,
   ConnectedSite,
   ConnectedSiteType,
   CustomSection,
   PersonaSettings,
+  ReasoningMode,
   RuleCategory,
   RuleWeight,
   TaughtRule,
@@ -96,6 +98,7 @@ export default function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
   const [sendingChat, setSendingChat] = useState(false);
+  const [reasoningMode, setReasoningMode] = useState<ReasoningMode>('balanced');
   const chatAbortRef = useRef<AbortController | null>(null);
   const [liveStatus, setLiveStatus] = useState<ArixLiveStatus>(() => ({
     busy: false,
@@ -499,13 +502,25 @@ export default function App() {
     }));
   };
 
-  const handleSendChat = async (message: string) => {
+  const handleSendChat = async (
+    message: string,
+    attachments?: ChatAttachment[],
+    modeOverride?: ReasoningMode
+  ) => {
     if (sendingChat) return;
+    const cleanText = message.trim();
+    const validAttachments = Array.isArray(attachments) ? attachments : [];
+    if (!cleanText && validAttachments.length === 0) return;
+
+    const activeMode = modeOverride || reasoningMode;
     const tempUserId = `temp-u-${Date.now()}`;
     const optimisticUserMsg: ChatMessage = {
       id: tempUserId,
       role: 'user',
-      content: message,
+      content:
+        cleanText ||
+        `Sent ${validAttachments.length} image${validAttachments.length > 1 ? 's' : ''}`,
+      attachments: validAttachments.length > 0 ? validAttachments : undefined,
       timestamp: new Date().toISOString(),
     };
     setChatHistory((prev) => [...prev, optimisticUserMsg]);
@@ -514,8 +529,13 @@ export default function App() {
       ...prev,
       busy: true,
       activeNode: 'core',
-      headline: 'Arix Core · Thinking',
-      detail: message.slice(0, 90),
+      headline:
+        activeMode === 'fast'
+          ? 'Arix Core · Fast Reply'
+          : activeMode === 'deep'
+            ? 'Arix Core · Deep Reasoning'
+            : 'Arix Core · Thinking',
+      detail: (cleanText || 'Analyzing image...').slice(0, 90),
     }));
 
     const controller = new AbortController();
@@ -528,7 +548,9 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
-          message,
+          message: cleanText,
+          attachments: validAttachments,
+          reasoningMode: activeMode,
           auditId: selectedAuditId,
           issueId: focusedIssueId,
           connectionId: selectedConnectionId,
@@ -956,9 +978,11 @@ export default function App() {
                   focusedIssueId={focusedIssueId}
                   selectedConnectionId={selectedConnectionId}
                   sending={sendingChat}
+                  reasoningMode={reasoningMode}
                   activeRuleCount={activeRules.length}
                   draftPrompt={draftChatPrompt}
                   onConsumeDraftPrompt={() => setDraftChatPrompt(null)}
+                  onChangeReasoningMode={setReasoningMode}
                   onSelectContext={(auditId, issueId, connId) => {
                     setSelectedAuditId(auditId);
                     setFocusedIssueId(issueId);

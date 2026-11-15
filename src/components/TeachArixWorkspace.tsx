@@ -71,6 +71,27 @@ const CURRICULUM_PRESETS: Array<{
     weight: 'strict',
   },
   {
+    title: 'Senior Full-Stack TypeScript, React & Tailwind',
+    instruction:
+      'Architect frontend code with React 19, clean hooks, accessible semantic HTML, responsive Tailwind CSS layouts, and strict TypeScript interfaces.',
+    category: 'coding',
+    weight: 'preferred',
+  },
+  {
+    title: 'Backend API, SQL & Security Engineering',
+    instruction:
+      'Build REST/SSE Express and Python APIs with strict input validation, parameterized SQL queries, clear error status codes, and server-side-only secrets.',
+    category: 'coding',
+    weight: 'strict',
+  },
+  {
+    title: 'Root-Cause Debugger & Windows/Node Fixer',
+    instruction:
+      'Diagnose exact root causes from stack traces, logs, and screenshots (broken imports, async bugs, Windows "&" folder quoting, npm --legacy-peer-deps, Electron locks) before proposing fixes.',
+    category: 'coding',
+    weight: 'preferred',
+  },
+  {
     title: 'Rank conversion & mobile blockers as P0',
     instruction:
       'In website audits, always prioritize broken checkout flows, missing mobile viewports, and unlabeled buttons as P0 Critical UX impact.',

@@ -1,21 +1,31 @@
-import { useState, type FormEvent } from 'react';
+import {
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type FormEvent,
+} from 'react';
 import {
   ArrowRight,
   BookOpen,
   Code2,
   Cpu,
   Globe,
+  ImagePlus,
   Link2,
   MonitorDown,
   Send,
   Sparkles,
   Wrench,
+  X,
 } from 'lucide-react';
 import { ArixCore3D } from './ArixCore3D';
 import { SelfSectionFrame } from './SelfSectionFrame';
+import { filesToChatAttachments } from '../utils/imageAttachment';
 import type {
   ArixLiveStatus,
   ArixSatelliteKey,
+  ChatAttachment,
   ChatMessage,
   CustomSection,
 } from '../types/arix';
@@ -30,7 +40,10 @@ interface MainPageProps {
   sendingCommand: boolean;
   latestArixReply: ChatMessage | null;
   customSections: CustomSection[];
-  onSendCommand: (message: string) => Promise<void>;
+  onSendCommand: (
+    message: string,
+    attachments?: ChatAttachment[]
+  ) => Promise<void>;
   onDeleteSection: (id: string) => Promise<void>;
   onAskArixToModifySection: (section: CustomSection) => void;
   onOpenDesktopAppModal: () => void;
@@ -56,13 +69,47 @@ export function MainPage({
   onNavigate,
 }: MainPageProps) {
   const [commandInput, setCommandInput] = useState('');
+  const [pendingImages, setPendingImages] = useState<ChatAttachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAttachFiles = async (files: FileList | File[] | null) => {
+    if (!files || files.length === 0) return;
+    const added = await filesToChatAttachments(files, pendingImages.length);
+    if (added.length > 0) {
+      setPendingImages((prev) => [...prev, ...added].slice(0, 4));
+    }
+  };
+
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    await handleAttachFiles(e.target.files);
+    e.target.value = '';
+  };
+
+  const handlePaste = async (e: ClipboardEvent<HTMLInputElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageFiles: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      await handleAttachFiles(imageFiles);
+    }
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!commandInput.trim() || sendingCommand) return;
+    if ((!commandInput.trim() && pendingImages.length === 0) || sendingCommand)
+      return;
     const text = commandInput.trim();
+    const imagesToSend = pendingImages;
     setCommandInput('');
-    await onSendCommand(text);
+    setPendingImages([]);
+    await onSendCommand(text, imagesToSend);
   };
 
   const handleSatelliteSelect = (node: ArixSatelliteKey) => {
@@ -186,10 +233,57 @@ export function MainPage({
 
         {/* Docked Main Page Command Composer */}
         <div className="p-5 sm:p-6 border-t border-slate-800/90 bg-[#071022] space-y-4">
+          {pendingImages.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              {pendingImages.map((img) => (
+                <div
+                  key={img.id}
+                  className="relative rounded-lg overflow-hidden border border-slate-700 bg-[#060E1F]"
+                >
+                  <img
+                    src={img.dataUrl}
+                    alt={img.name}
+                    className="h-14 w-14 object-cover block"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPendingImages((prev) =>
+                        prev.filter((item) => item.id !== img.id)
+                      )
+                    }
+                    aria-label={`Remove ${img.name}`}
+                    className="absolute top-0.5 right-0.5 p-0.5 rounded-full bg-slate-950/85 text-slate-200 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <form
             onSubmit={handleSubmit}
             className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3"
           >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleFileChange}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={sendingCommand || pendingImages.length >= 4}
+              title="Attach image or screenshot (or Ctrl+V)"
+              aria-label="Attach image to command"
+              className="inline-flex items-center justify-center px-3.5 py-3 bg-[#060E1F] border border-slate-700 text-slate-200 hover:text-sky-300 hover:border-sky-500/60 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <ImagePlus className="w-4 h-4" />
+            </button>
             <label htmlFor="main-arix-command" className="sr-only">
               Command Arix directly
             </label>
@@ -198,12 +292,16 @@ export function MainPage({
               type="text"
               value={commandInput}
               onChange={(e) => setCommandInput(e.target.value)}
-              placeholder='Command Arix (e.g. "Add status.md to my GitHub", "Create folder notes", "Send update to Telegram")...'
+              onPaste={handlePaste}
+              placeholder='Command Arix or paste an image (Ctrl+V) — e.g. "Fix this error screenshot", "Create presentation"...'
               className="flex-1 px-4 py-3 text-sm bg-[#060E1F] border border-slate-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500/35 focus:border-sky-500"
             />
             <button
               type="submit"
-              disabled={sendingCommand || !commandInput.trim()}
+              disabled={
+                sendingCommand ||
+                (!commandInput.trim() && pendingImages.length === 0)
+              }
               className="inline-flex items-center justify-center gap-2 px-5 py-3 bg-sky-500 text-slate-950 text-sm font-semibold rounded-lg hover:bg-sky-400 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Send className="w-4 h-4" />

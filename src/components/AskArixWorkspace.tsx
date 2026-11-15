@@ -1,17 +1,36 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent,
+  type FormEvent,
+} from 'react';
 import {
   ArrowRight,
   Brain,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ImagePlus,
   Send,
+  Sparkles,
   Trash2,
   Wrench,
+  X,
+  Zap,
 } from 'lucide-react';
 import { ArixAvatar } from './ArixAvatar';
 import { CodeBlock } from './CodeBlock';
-import type { ChatMessage, ConnectedSite, WebsiteAudit } from '../types/arix';
+import { filesToChatAttachments } from '../utils/imageAttachment';
+import type {
+  ChatAttachment,
+  ChatMessage,
+  ConnectedSite,
+  ReasoningMode,
+  WebsiteAudit,
+} from '../types/arix';
 
 interface AskArixWorkspaceProps {
   messages: ChatMessage[];
@@ -21,15 +40,20 @@ interface AskArixWorkspaceProps {
   focusedIssueId: string | null;
   selectedConnectionId: string | null;
   sending: boolean;
+  reasoningMode: ReasoningMode;
   activeRuleCount: number;
   draftPrompt?: string | null;
   onConsumeDraftPrompt?: () => void;
+  onChangeReasoningMode: (mode: ReasoningMode) => void;
   onSelectContext: (
     auditId: string | null,
     issueId: string | null,
     connectionId: string | null
   ) => void;
-  onSendMessage: (message: string) => Promise<void>;
+  onSendMessage: (
+    message: string,
+    attachments?: ChatAttachment[]
+  ) => Promise<void>;
   onCancelSending?: () => void;
   onClearChat: () => Promise<void>;
   onGoToTeach: () => void;
@@ -77,9 +101,11 @@ export function AskArixWorkspace({
   focusedIssueId,
   selectedConnectionId,
   sending,
+  reasoningMode,
   activeRuleCount,
   draftPrompt,
   onConsumeDraftPrompt,
+  onChangeReasoningMode,
   onSelectContext,
   onSendMessage,
   onCancelSending,
@@ -87,9 +113,13 @@ export function AskArixWorkspace({
   onGoToTeach,
 }: AskArixWorkspaceProps) {
   const [input, setInput] = useState('');
+  const [pendingImages, setPendingImages] = useState<ChatAttachment[]>([]);
+  const [dragActive, setDragActive] = useState(false);
+  const [previewImage, setPreviewImage] = useState<ChatAttachment | null>(null);
   const [expandedThoughts, setExpandedThoughts] = useState<
     Record<string, boolean>
   >({});
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -109,12 +139,51 @@ export function AskArixWorkspace({
     (c) => c.id === selectedConnectionId
   );
 
+  const handleAttachFiles = async (files: FileList | File[] | null) => {
+    if (!files || files.length === 0) return;
+    const added = await filesToChatAttachments(files, pendingImages.length);
+    if (added.length > 0) {
+      setPendingImages((prev) => [...prev, ...added].slice(0, 4));
+    }
+  };
+
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    await handleAttachFiles(e.target.files);
+    e.target.value = '';
+  };
+
+  const handlePaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageFiles: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      await handleAttachFiles(imageFiles);
+    }
+  };
+
+  const handleDrop = async (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragActive(false);
+    if (e.dataTransfer?.files?.length) {
+      await handleAttachFiles(e.dataTransfer.files);
+    }
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || sending) return;
+    if ((!input.trim() && pendingImages.length === 0) || sending) return;
     const text = input.trim();
+    const imagesToSend = pendingImages;
     setInput('');
-    await onSendMessage(text);
+    setPendingImages([]);
+    await onSendMessage(text, imagesToSend);
   };
 
   const quickPrompts = focusedIssue
@@ -137,7 +206,21 @@ export function AskArixWorkspace({
         ];
 
   return (
-    <div className="bg-[#0B152B] border border-slate-800/90 rounded-xl flex flex-col h-[calc(100vh-11rem)] min-h-[540px] overflow-hidden">
+    <div
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragActive(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+          setDragActive(false);
+        }
+      }}
+      onDrop={handleDrop}
+      className={`relative bg-[#0B152B] border rounded-xl flex flex-col h-[calc(100vh-11rem)] min-h-[540px] overflow-hidden transition-colors ${
+        dragActive ? 'border-sky-400 ring-2 ring-sky-500/30' : 'border-slate-800/90'
+      }`}
+    >
       {/* Context Bar */}
       <div className="px-6 py-3.5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-4 bg-[#081124]">
         <div className="flex flex-wrap items-center gap-3">
@@ -159,6 +242,44 @@ export function AskArixWorkspace({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <div
+            role="group"
+            aria-label="Arix response speed and reasoning depth"
+            className="inline-flex items-center rounded-lg border border-slate-700 bg-[#060E1F] p-0.5"
+          >
+            {(
+              [
+                { id: 'fast', label: 'Fast', icon: Zap },
+                { id: 'balanced', label: 'Balanced', icon: Sparkles },
+                { id: 'deep', label: 'Deep', icon: Brain },
+              ] as const
+            ).map((opt) => {
+              const Icon = opt.icon;
+              const active = reasoningMode === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => onChangeReasoningMode(opt.id)}
+                  title={
+                    opt.id === 'fast'
+                      ? 'Fastest answers (lowest latency)'
+                      : opt.id === 'balanced'
+                        ? 'Smart coding & fast analysis (default)'
+                        : 'Deep reasoning with step-by-step thinking'
+                  }
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                    active
+                      ? 'bg-sky-500 text-slate-950 font-semibold'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <Icon className="w-3 h-3" />
+                  <span>{opt.label}</span>
+                </button>
+              );
+            })}
+          </div>
           {connections.length > 0 && (
             <select
               aria-label="Attach connected platform"
@@ -333,6 +454,25 @@ export function AskArixWorkspace({
                     </div>
                   )}
 
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="mb-2.5 flex flex-wrap gap-2">
+                      {msg.attachments.map((att) => (
+                        <button
+                          key={att.id}
+                          type="button"
+                          onClick={() => setPreviewImage(att)}
+                          className="group relative rounded-lg overflow-hidden border border-slate-950/20 bg-black/20 cursor-pointer"
+                        >
+                          <img
+                            src={att.dataUrl}
+                            alt={att.name}
+                            className="max-h-44 max-w-[240px] object-cover block"
+                          />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
                   {msg.role === 'user' ? (
                     <p className="text-sm leading-relaxed whitespace-pre-wrap">
                       {msg.content}
@@ -394,46 +534,138 @@ export function AskArixWorkspace({
         onSubmit={handleSubmit}
         className="p-4 border-t border-slate-800 bg-[#081124]"
       >
-        <div className="max-w-3xl mx-auto flex items-end gap-3">
-          <div className="flex-1">
-            <label htmlFor="ask-arix-input" className="sr-only">
-              Command Arix or teach a new rule
-            </label>
-            <textarea
-              id="ask-arix-input"
-              rows={2}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSubmit(e);
-                }
-              }}
-              placeholder="Ask Arix to code, inspect GitHub/Cloudflare, fix an error, or teach a new rule..."
-              className="w-full px-3.5 py-2.5 text-sm bg-[#060E1F] border border-slate-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500/30 focus:border-sky-500 resize-none"
+        <div className="max-w-3xl mx-auto space-y-2.5">
+          {pendingImages.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2.5">
+              {pendingImages.map((img) => (
+                <div
+                  key={img.id}
+                  className="relative group rounded-lg overflow-hidden border border-slate-700 bg-[#060E1F]"
+                >
+                  <img
+                    src={img.dataUrl}
+                    alt={img.name}
+                    className="h-16 w-16 object-cover block"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPendingImages((prev) =>
+                        prev.filter((item) => item.id !== img.id)
+                      )
+                    }
+                    aria-label={`Remove ${img.name}`}
+                    className="absolute top-1 right-1 p-0.5 rounded-full bg-slate-950/85 text-slate-200 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+              <span className="text-xs text-slate-400">
+                {pendingImages.length}/4 image{pendingImages.length > 1 ? 's' : ''} attached
+              </span>
+            </div>
+          )}
+
+          <div className="flex items-end gap-2.5">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleFileChange}
+              className="hidden"
             />
-          </div>
-          {sending && onCancelSending ? (
             <button
               type="button"
-              onClick={onCancelSending}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-500 text-slate-950 text-sm font-semibold rounded-lg hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer h-[44px]"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={sending || pendingImages.length >= 4}
+              title="Attach image or screenshot (or Ctrl+V / drag & drop)"
+              aria-label="Attach image"
+              className="inline-flex items-center justify-center px-3 bg-[#060E1F] border border-slate-700 text-slate-200 hover:text-sky-300 hover:border-sky-500/60 disabled:opacity-40 rounded-lg transition-colors shrink-0 cursor-pointer h-[44px]"
             >
-              <span>Cancel</span>
+              <ImagePlus className="w-4 h-4" />
             </button>
-          ) : (
-            <button
-              type="submit"
-              disabled={!input.trim()}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-sky-500 text-slate-950 text-sm font-semibold rounded-lg hover:bg-sky-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer h-[44px]"
-            >
-              <Send className="w-4 h-4" />
-              <span>Send</span>
-            </button>
-          )}
+
+            <div className="flex-1">
+              <label htmlFor="ask-arix-input" className="sr-only">
+                Command Arix or teach a new rule
+              </label>
+              <textarea
+                id="ask-arix-input"
+                rows={2}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onPaste={handlePaste}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSubmit(e);
+                  }
+                }}
+                placeholder="Ask Arix to code, paste a screenshot (Ctrl+V), attach an image, or teach a rule..."
+                className="w-full px-3.5 py-2.5 text-sm bg-[#060E1F] border border-slate-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500/30 focus:border-sky-500 resize-none"
+              />
+            </div>
+
+            {sending && onCancelSending ? (
+              <button
+                type="button"
+                onClick={onCancelSending}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-500 text-slate-950 text-sm font-semibold rounded-lg hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer h-[44px]"
+              >
+                <span>Cancel</span>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim() && pendingImages.length === 0}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-sky-500 text-slate-950 text-sm font-semibold rounded-lg hover:bg-sky-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer h-[44px]"
+              >
+                <Send className="w-4 h-4" />
+                <span>Send</span>
+              </button>
+            )}
+          </div>
         </div>
       </form>
+
+      {dragActive && (
+        <div className="pointer-events-none absolute inset-0 bg-sky-950/75 border-2 border-dashed border-sky-400 rounded-xl flex items-center justify-center z-20">
+          <div className="text-center space-y-1">
+            <ImagePlus className="w-8 h-8 text-sky-300 mx-auto" />
+            <p className="text-sm font-semibold text-white">
+              Drop image(s) to send to Arix
+            </p>
+          </div>
+        </div>
+      )}
+
+      {previewImage && (
+        <div
+          onClick={() => setPreviewImage(null)}
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-6"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative max-w-4xl max-h-[90vh] bg-[#081124] border border-slate-700 rounded-xl p-3"
+          >
+            <button
+              type="button"
+              onClick={() => setPreviewImage(null)}
+              aria-label="Close image preview"
+              className="absolute top-3 right-3 p-1.5 rounded-lg bg-slate-900/90 text-slate-200 hover:text-white cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <img
+              src={previewImage.dataUrl}
+              alt={previewImage.name}
+              className="max-h-[82vh] max-w-full rounded-lg object-contain"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

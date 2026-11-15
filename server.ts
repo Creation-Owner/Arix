@@ -66,14 +66,17 @@ import {
   type PresentationSlideInput,
   type PresentationThemeKey,
 } from './server/presentations.ts';
+import { ARIX_CORE_ENGINEERING_KNOWLEDGE } from './server/knowledge.ts';
 import type {
   ArixActivityEvent,
   ArixSatelliteKey,
   AuditIssue,
+  ChatAttachment,
   ChatMessage,
   ConnectedSite,
   ConnectedSiteType,
   PersonaSettings,
+  ReasoningMode,
   RuleCategory,
   RuleWeight,
   TaughtRule,
@@ -135,6 +138,8 @@ ${rulesBlock}
 
 CONNECTED PLATFORMS (WEBSITES, GITHUB, CLOUDFLARE, TELEGRAM, APIS):
 ${connectionsBlock}
+
+${ARIX_CORE_ENGINEERING_KNOWLEDGE}
 
 OPERATING & REASONING PRINCIPLES:
 1. You belong exclusively to the owner. Act as a senior principal engineer, UX architect, strategist, and research analyst — think carefully from first principles before responding.
@@ -783,7 +788,7 @@ function formatToolDoneTitle(toolName: string): string {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '12mb' }));
+  app.use(express.json({ limit: '25mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, ai: 'Arix' });
@@ -1628,12 +1633,84 @@ async function startServer() {
   // Arix Command Chat (Filesystem, Telegram, GitHub, Cloudflare, Websites & Memory tools)
   app.post('/api/chat', async (req, res) => {
     try {
-      const { message, auditId, issueId, connectionId } = req.body ?? {};
+      const {
+        message,
+        auditId,
+        issueId,
+        connectionId,
+        attachments,
+        reasoningMode: rawReasoningMode,
+      } = req.body ?? {};
       const cleanMessage = String(message || '').trim();
-      if (!cleanMessage) {
-        res.status(400).json({ error: 'Message cannot be empty.' });
+      const reasoningMode: ReasoningMode =
+        rawReasoningMode === 'fast' || rawReasoningMode === 'deep'
+          ? rawReasoningMode
+          : 'balanced';
+
+      const parsedAttachments: Array<{
+        attachment: ChatAttachment;
+        mimeType: string;
+        base64: string;
+      }> = [];
+
+      if (Array.isArray(attachments)) {
+        for (const item of attachments.slice(0, 4)) {
+          if (!item || typeof item !== 'object') continue;
+          const rawDataUrl =
+            typeof item.dataUrl === 'string' ? item.dataUrl : '';
+          const rawBase64 = typeof item.base64 === 'string' ? item.base64 : '';
+          let mimeType =
+            typeof item.mimeType === 'string' && item.mimeType.startsWith('image/')
+              ? item.mimeType
+              : 'image/png';
+          let base64 = rawBase64;
+          let dataUrl = rawDataUrl;
+
+          if (!base64 && rawDataUrl.startsWith('data:image/')) {
+            const commaIdx = rawDataUrl.indexOf(',');
+            if (commaIdx > 0) {
+              const header = rawDataUrl.slice(5, commaIdx);
+              const semiIdx = header.indexOf(';');
+              if (semiIdx > 0) {
+                mimeType = header.slice(0, semiIdx);
+              }
+              base64 = rawDataUrl.slice(commaIdx + 1);
+            }
+          } else if (base64 && !dataUrl) {
+            dataUrl = `data:${mimeType};base64,${base64}`;
+          }
+
+          if (base64 && mimeType.startsWith('image/')) {
+            parsedAttachments.push({
+              attachment: {
+                id:
+                  typeof item.id === 'string' && item.id
+                    ? item.id
+                    : `att-${Date.now()}-${parsedAttachments.length}`,
+                name:
+                  typeof item.name === 'string' && item.name
+                    ? item.name
+                    : `image-${parsedAttachments.length + 1}.png`,
+                mimeType,
+                dataUrl,
+              },
+              mimeType,
+              base64,
+            });
+          }
+        }
+      }
+
+      if (!cleanMessage && parsedAttachments.length === 0) {
+        res
+          .status(400)
+          .json({ error: 'Please enter a message or attach an image.' });
         return;
       }
+
+      const displayMessage =
+        cleanMessage ||
+        `Sent ${parsedAttachments.length} image${parsedAttachments.length > 1 ? 's' : ''}`;
 
       const state = getPublicState();
       const activeRules = state.rules.filter((r) => r.active);
@@ -1674,15 +1751,39 @@ async function startServer() {
         );
       }
 
-      const recentHistory = state.chatHistory.slice(-12).map((m) => ({
-        role: m.role === 'user' ? ('user' as const) : ('model' as const),
-        parts: [{ text: m.content }],
-      }));
+      const recentHistory = state.chatHistory.slice(-10).map((m) => {
+        const attachmentNote =
+          m.attachments && m.attachments.length > 0
+            ? ` [Attached ${m.attachments.length} image(s): ${m.attachments.map((a) => a.name).join(', ')}]`
+            : '';
+        const clipped =
+          m.content.length > 2600
+            ? `${m.content.slice(0, 2600)}\n...[truncated]`
+            : m.content;
+        return {
+          role: m.role === 'user' ? ('user' as const) : ('model' as const),
+          parts: [{ text: `${clipped}${attachmentNote}` }],
+        };
+      });
+
+      const effectivePromptText =
+        cleanMessage ||
+        'Inspect the attached image(s) in detail, explain what you see, and provide solutions or next steps.';
 
       const userTurnText =
         contextParts.length > 0
-          ? `${contextParts.join('\n\n')}\n\nOWNER REQUEST:\n${cleanMessage}`
-          : cleanMessage;
+          ? `${contextParts.join('\n\n')}\n\nOWNER REQUEST:\n${effectivePromptText}`
+          : effectivePromptText;
+
+      const userTurnParts: Part[] = [
+        ...parsedAttachments.map((a) => ({
+          inlineData: {
+            mimeType: a.mimeType,
+            data: a.base64,
+          },
+        })),
+        { text: userTurnText },
+      ];
 
       const systemInstruction = `${buildArixSystemInstruction(
         state.persona,
@@ -1740,7 +1841,7 @@ ${
 
       let conversationContents: Array<{ role: 'user' | 'model'; parts: Part[] }> = [
         ...recentHistory,
-        { role: 'user', parts: [{ text: userTurnText }] },
+        { role: 'user', parts: userTurnParts },
       ];
 
       const newlyLearnedRules: TaughtRule[] = [];
@@ -1749,11 +1850,28 @@ ${
       let finalReply = '';
       let lastActiveNode: ArixSatelliteKey = 'core';
 
+      const primaryThinkingConfig =
+        reasoningMode === 'fast'
+          ? { thinkingLevel: ThinkingLevel.LOW }
+          : reasoningMode === 'deep'
+            ? { thinkingLevel: ThinkingLevel.HIGH, includeThoughts: true }
+            : { thinkingLevel: ThinkingLevel.MEDIUM };
+
+      const followUpThinkingConfig =
+        reasoningMode === 'deep'
+          ? { thinkingLevel: ThinkingLevel.HIGH, includeThoughts: true }
+          : { thinkingLevel: ThinkingLevel.LOW };
+
       emitArixActivity({
         phase: 'thinking',
         node: 'core',
-        title: 'Arix Core · Deep Reasoning',
-        detail: cleanMessage.slice(0, 90),
+        title:
+          reasoningMode === 'fast'
+            ? 'Arix Core · Fast Reply'
+            : reasoningMode === 'deep'
+              ? 'Arix Core · Deep Reasoning'
+              : 'Arix Core · Thinking',
+        detail: displayMessage.slice(0, 90),
       });
 
       for (let step = 0; step < 8; step++) {
@@ -1763,10 +1881,8 @@ ${
           config: {
             systemInstruction,
             tools,
-            thinkingConfig: {
-              thinkingLevel: ThinkingLevel.HIGH,
-              includeThoughts: true,
-            },
+            thinkingConfig:
+              step === 0 ? primaryThinkingConfig : followUpThinkingConfig,
           },
         });
 
@@ -2401,10 +2517,7 @@ ${
             ],
             config: {
               systemInstruction,
-              thinkingConfig: {
-                thinkingLevel: ThinkingLevel.HIGH,
-                includeThoughts: true,
-              },
+              thinkingConfig: followUpThinkingConfig,
             },
           });
           const synthExtracted = extractAnswerAndThoughts(synthesisResp);
@@ -2433,7 +2546,11 @@ ${
       const userMsg: ChatMessage = {
         id: `msg-${Date.now()}-u`,
         role: 'user',
-        content: cleanMessage,
+        content: displayMessage,
+        attachments:
+          parsedAttachments.length > 0
+            ? parsedAttachments.map((a) => a.attachment)
+            : undefined,
         timestamp: new Date().toISOString(),
         auditId: targetAudit?.id,
         issueId: targetIssue?.id,
@@ -2444,6 +2561,7 @@ ${
         role: 'arix',
         content: finalReply,
         thinkingSummary,
+        reasoningMode,
         timestamp: new Date().toISOString(),
         auditId: targetAudit?.id,
         issueId: targetIssue?.id,

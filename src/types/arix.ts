@@ -128,11 +128,22 @@ export interface WebsiteAudit {
   issues: AuditIssue[];
 }
 
+export type ReasoningMode = 'fast' | 'balanced' | 'deep';
+
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'arix';
   content: string;
+  attachments?: ChatAttachment[];
   thinkingSummary?: string;
+  reasoningMode?: ReasoningMode;
   timestamp: string;
   auditId?: string;
   issueId?: string;
