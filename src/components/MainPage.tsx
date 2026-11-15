@@ -10,10 +10,11 @@ import {
   BookOpen,
   Code2,
   Cpu,
+  FileText,
   Globe,
-  ImagePlus,
   Link2,
   MonitorDown,
+  Paperclip,
   Send,
   Sparkles,
   Wrench,
@@ -235,24 +236,32 @@ export function MainPage({
         <div className="p-5 sm:p-6 border-t border-slate-800/90 bg-[#071022] space-y-4">
           {pendingImages.length > 0 && (
             <div className="flex flex-wrap items-center gap-2">
-              {pendingImages.map((img) => (
+              {pendingImages.map((att) => (
                 <div
-                  key={img.id}
+                  key={att.id}
                   className="relative rounded-lg overflow-hidden border border-slate-700 bg-[#060E1F]"
                 >
-                  <img
-                    src={img.dataUrl}
-                    alt={img.name}
-                    className="h-14 w-14 object-cover block"
-                  />
+                  {att.dataUrl &&
+                  (att.kind === 'image' || att.mimeType.startsWith('image/')) ? (
+                    <img
+                      src={att.dataUrl}
+                      alt={att.name}
+                      className="h-14 w-14 object-cover block"
+                    />
+                  ) : (
+                    <div className="h-14 px-3 pr-7 flex items-center gap-2 text-xs text-slate-200 max-w-[180px]">
+                      <FileText className="w-4 h-4 text-sky-400 shrink-0" />
+                      <span className="truncate">{att.name}</span>
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={() =>
                       setPendingImages((prev) =>
-                        prev.filter((item) => item.id !== img.id)
+                        prev.filter((item) => item.id !== att.id)
                       )
                     }
-                    aria-label={`Remove ${img.name}`}
+                    aria-label={`Remove ${att.name}`}
                     className="absolute top-0.5 right-0.5 p-0.5 rounded-full bg-slate-950/85 text-slate-200 hover:text-white cursor-pointer"
                   >
                     <X className="w-3 h-3" />
@@ -269,7 +278,7 @@ export function MainPage({
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept="image/*,.pdf,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.html,.css,.sql,.log,.yml,.yaml,.xml"
               multiple
               onChange={handleFileChange}
               className="hidden"
@@ -278,11 +287,11 @@ export function MainPage({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={sendingCommand || pendingImages.length >= 4}
-              title="Attach image or screenshot (or Ctrl+V)"
-              aria-label="Attach image to command"
+              title="Attach image, PDF, or code/text file (or Ctrl+V)"
+              aria-label="Attach image, PDF, or file to command"
               className="inline-flex items-center justify-center px-3.5 py-3 bg-[#060E1F] border border-slate-700 text-slate-200 hover:text-sky-300 hover:border-sky-500/60 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <ImagePlus className="w-4 h-4" />
+              <Paperclip className="w-4 h-4" />
             </button>
             <label htmlFor="main-arix-command" className="sr-only">
               Command Arix directly

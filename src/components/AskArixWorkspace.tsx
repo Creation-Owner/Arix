@@ -10,10 +10,17 @@ import {
 import {
   ArrowRight,
   Brain,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  ImagePlus,
+  Copy,
+  Download,
+  ExternalLink,
+  FileText,
+  Mic,
+  MicOff,
+  Paperclip,
   Send,
   Sparkles,
   Trash2,
@@ -116,11 +123,89 @@ export function AskArixWorkspace({
   const [pendingImages, setPendingImages] = useState<ChatAttachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [previewImage, setPreviewImage] = useState<ChatAttachment | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [listening, setListening] = useState(false);
   const [expandedThoughts, setExpandedThoughts] = useState<
     Record<string, boolean>
   >({});
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<{ stop: () => void } | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+
+  const speechSupported =
+    typeof window !== 'undefined' &&
+    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+
+  const toggleVoiceInput = () => {
+    if (listening) {
+      recognitionRef.current?.stop();
+      setListening(false);
+      return;
+    }
+    const win = window as unknown as {
+      SpeechRecognition?: new () => {
+        continuous: boolean;
+        interimResults: boolean;
+        lang: string;
+        onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+        onerror: (() => void) | null;
+        onend: (() => void) | null;
+        start: () => void;
+        stop: () => void;
+      };
+      webkitSpeechRecognition?: new () => {
+        continuous: boolean;
+        interimResults: boolean;
+        lang: string;
+        onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+        onerror: (() => void) | null;
+        onend: (() => void) | null;
+        start: () => void;
+        stop: () => void;
+      };
+    };
+    const SpeechRec = win.SpeechRecognition || win.webkitSpeechRecognition;
+    if (!SpeechRec) return;
+
+    const rec = new SpeechRec();
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.lang = 'en-US';
+    rec.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((r) => r[0]?.transcript || '')
+        .join(' ')
+        .trim();
+      if (transcript) {
+        setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+      }
+    };
+    rec.onerror = () => setListening(false);
+    rec.onend = () => setListening(false);
+    recognitionRef.current = rec;
+    setListening(true);
+    rec.start();
+  };
+
+  const handleCopyReply = async (id: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((curr) => (curr === id ? null : curr)), 1800);
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
+
+  const handleDownloadReply = (msg: ChatMessage) => {
+    const blob = new Blob([msg.content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `arix-reply-${msg.id}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   useEffect(() => {
     if (draftPrompt) {
@@ -456,20 +541,38 @@ export function AskArixWorkspace({
 
                   {msg.attachments && msg.attachments.length > 0 && (
                     <div className="mb-2.5 flex flex-wrap gap-2">
-                      {msg.attachments.map((att) => (
-                        <button
-                          key={att.id}
-                          type="button"
-                          onClick={() => setPreviewImage(att)}
-                          className="group relative rounded-lg overflow-hidden border border-slate-950/20 bg-black/20 cursor-pointer"
-                        >
-                          <img
-                            src={att.dataUrl}
-                            alt={att.name}
-                            className="max-h-44 max-w-[240px] object-cover block"
-                          />
-                        </button>
-                      ))}
+                      {msg.attachments.map((att) =>
+                        att.dataUrl &&
+                        (att.kind === 'image' ||
+                          att.mimeType.startsWith('image/')) ? (
+                          <button
+                            key={att.id}
+                            type="button"
+                            onClick={() => setPreviewImage(att)}
+                            className="group relative rounded-lg overflow-hidden border border-slate-950/20 bg-black/20 cursor-pointer"
+                          >
+                            <img
+                              src={att.dataUrl}
+                              alt={att.name}
+                              className="max-h-44 max-w-[240px] object-cover block"
+                            />
+                          </button>
+                        ) : (
+                          <div
+                            key={att.id}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border ${
+                              msg.role === 'user'
+                                ? 'bg-slate-950/15 border-slate-950/20 text-slate-950'
+                                : 'bg-[#060E1F] border-slate-700 text-slate-200'
+                            }`}
+                          >
+                            <FileText className="w-3.5 h-3.5 shrink-0" />
+                            <span className="max-w-[180px] truncate">
+                              {att.name}
+                            </span>
+                          </div>
+                        )
+                      )}
                     </div>
                   )}
 
@@ -480,6 +583,30 @@ export function AskArixWorkspace({
                   ) : (
                     renderFormattedReply(msg.content)
                   )}
+
+                  {msg.role === 'arix' &&
+                    msg.sources &&
+                    msg.sources.length > 0 && (
+                      <div className="mt-3 pt-2.5 border-t border-slate-800/90 space-y-1.5">
+                        <div className="text-[11px] font-medium text-slate-400">
+                          Web Sources
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {msg.sources.map((src) => (
+                            <a
+                              key={src.url}
+                              href={src.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#060E1F] border border-slate-700/80 hover:border-sky-500/60 text-xs text-sky-300 max-w-[240px]"
+                            >
+                              <span className="truncate">{src.title}</span>
+                              <ExternalLink className="w-3 h-3 shrink-0" />
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                   {msg.toolsInvoked && msg.toolsInvoked.length > 0 && (
                     <div className="mt-3 pt-2 border-t border-slate-800/90 flex flex-wrap items-center gap-2 text-xs text-sky-400">
@@ -501,6 +628,36 @@ export function AskArixWorkspace({
                           </span>
                         </div>
                       ))}
+                    </div>
+                  )}
+
+                  {msg.role === 'arix' && (
+                    <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleCopyReply(msg.id, msg.content)}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-slate-400 hover:text-slate-200 rounded border border-slate-800 hover:border-slate-700 cursor-pointer"
+                      >
+                        {copiedId === msg.id ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-400" />
+                            <span className="text-emerald-400">Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>Copy</span>
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadReply(msg)}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-slate-400 hover:text-slate-200 rounded border border-slate-800 hover:border-slate-700 cursor-pointer"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>.md</span>
+                      </button>
                     </div>
                   )}
                 </div>
@@ -537,24 +694,32 @@ export function AskArixWorkspace({
         <div className="max-w-3xl mx-auto space-y-2.5">
           {pendingImages.length > 0 && (
             <div className="flex flex-wrap items-center gap-2.5">
-              {pendingImages.map((img) => (
+              {pendingImages.map((att) => (
                 <div
-                  key={img.id}
+                  key={att.id}
                   className="relative group rounded-lg overflow-hidden border border-slate-700 bg-[#060E1F]"
                 >
-                  <img
-                    src={img.dataUrl}
-                    alt={img.name}
-                    className="h-16 w-16 object-cover block"
-                  />
+                  {att.dataUrl &&
+                  (att.kind === 'image' || att.mimeType.startsWith('image/')) ? (
+                    <img
+                      src={att.dataUrl}
+                      alt={att.name}
+                      className="h-16 w-16 object-cover block"
+                    />
+                  ) : (
+                    <div className="h-16 px-3 pr-7 flex items-center gap-2 text-xs text-slate-200 max-w-[190px]">
+                      <FileText className="w-4 h-4 text-sky-400 shrink-0" />
+                      <span className="truncate">{att.name}</span>
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={() =>
                       setPendingImages((prev) =>
-                        prev.filter((item) => item.id !== img.id)
+                        prev.filter((item) => item.id !== att.id)
                       )
                     }
-                    aria-label={`Remove ${img.name}`}
+                    aria-label={`Remove ${att.name}`}
                     className="absolute top-1 right-1 p-0.5 rounded-full bg-slate-950/85 text-slate-200 hover:text-white cursor-pointer"
                   >
                     <X className="w-3 h-3" />
@@ -562,7 +727,7 @@ export function AskArixWorkspace({
                 </div>
               ))}
               <span className="text-xs text-slate-400">
-                {pendingImages.length}/4 image{pendingImages.length > 1 ? 's' : ''} attached
+                {pendingImages.length}/4 file{pendingImages.length > 1 ? 's' : ''} attached
               </span>
             </div>
           )}
@@ -571,7 +736,7 @@ export function AskArixWorkspace({
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept="image/*,.pdf,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.html,.css,.sql,.log,.yml,.yaml,.xml"
               multiple
               onChange={handleFileChange}
               className="hidden"
@@ -580,12 +745,33 @@ export function AskArixWorkspace({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={sending || pendingImages.length >= 4}
-              title="Attach image or screenshot (or Ctrl+V / drag & drop)"
-              aria-label="Attach image"
+              title="Attach image, PDF, or code/text file (or Ctrl+V / drag & drop)"
+              aria-label="Attach image, PDF, or file"
               className="inline-flex items-center justify-center px-3 bg-[#060E1F] border border-slate-700 text-slate-200 hover:text-sky-300 hover:border-sky-500/60 disabled:opacity-40 rounded-lg transition-colors shrink-0 cursor-pointer h-[44px]"
             >
-              <ImagePlus className="w-4 h-4" />
+              <Paperclip className="w-4 h-4" />
             </button>
+
+            {speechSupported && (
+              <button
+                type="button"
+                onClick={toggleVoiceInput}
+                disabled={sending}
+                title={listening ? 'Stop voice dictation' : 'Speak command'}
+                aria-label={listening ? 'Stop voice input' : 'Start voice input'}
+                className={`inline-flex items-center justify-center px-3 border rounded-lg transition-colors shrink-0 cursor-pointer h-[44px] ${
+                  listening
+                    ? 'bg-red-500/20 border-red-500 text-red-300'
+                    : 'bg-[#060E1F] border-slate-700 text-slate-200 hover:text-sky-300 hover:border-sky-500/60'
+                }`}
+              >
+                {listening ? (
+                  <MicOff className="w-4 h-4" />
+                ) : (
+                  <Mic className="w-4 h-4" />
+                )}
+              </button>
+            )}
 
             <div className="flex-1">
               <label htmlFor="ask-arix-input" className="sr-only">
@@ -603,7 +789,7 @@ export function AskArixWorkspace({
                     handleSubmit(e);
                   }
                 }}
-                placeholder="Ask Arix to code, paste a screenshot (Ctrl+V), attach an image, or teach a rule..."
+                placeholder="Ask Arix anything, paste a screenshot (Ctrl+V), attach code/PDF/image, or run commands..."
                 className="w-full px-3.5 py-2.5 text-sm bg-[#060E1F] border border-slate-700 text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500/30 focus:border-sky-500 resize-none"
               />
             </div>
@@ -633,9 +819,9 @@ export function AskArixWorkspace({
       {dragActive && (
         <div className="pointer-events-none absolute inset-0 bg-sky-950/75 border-2 border-dashed border-sky-400 rounded-xl flex items-center justify-center z-20">
           <div className="text-center space-y-1">
-            <ImagePlus className="w-8 h-8 text-sky-300 mx-auto" />
+            <Paperclip className="w-8 h-8 text-sky-300 mx-auto" />
             <p className="text-sm font-semibold text-white">
-              Drop image(s) to send to Arix
+              Drop image, PDF, or code files to send to Arix
             </p>
           </div>
         </div>

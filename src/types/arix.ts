@@ -134,7 +134,15 @@ export interface ChatAttachment {
   id: string;
   name: string;
   mimeType: string;
-  dataUrl: string;
+  kind?: 'image' | 'pdf' | 'text';
+  dataUrl?: string;
+  textContent?: string;
+  sizeBytes?: number;
+}
+
+export interface ChatSource {
+  title: string;
+  url: string;
 }
 
 export interface ChatMessage {
@@ -142,6 +150,7 @@ export interface ChatMessage {
   role: 'user' | 'arix';
   content: string;
   attachments?: ChatAttachment[];
+  sources?: ChatSource[];
   thinkingSummary?: string;
   reasoningMode?: ReasoningMode;
   timestamp: string;

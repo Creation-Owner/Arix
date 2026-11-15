@@ -22,7 +22,9 @@ import {
   deleteLocalPath,
   findLocalFiles,
   listComputerEntries,
+  patchLocalFile,
   readLocalFile,
+  runComputerCommand,
 } from './server/computer.ts';
 import {
   inspectCloudflareConnection,
@@ -73,6 +75,7 @@ import type {
   AuditIssue,
   ChatAttachment,
   ChatMessage,
+  ChatSource,
   ConnectedSite,
   ConnectedSiteType,
   PersonaSettings,
@@ -300,6 +303,22 @@ const inspectCloudflareDomainDeclaration: FunctionDeclaration = {
   },
 };
 
+const listComputerFolderDeclaration: FunctionDeclaration = {
+  name: 'listComputerFolder',
+  description:
+    'List all files and subfolders inside a directory of the host computer workspace root.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      subDir: {
+        type: Type.STRING,
+        description:
+          'Optional relative subfolder path (leave empty or "." for workspace root).',
+      },
+    },
+  },
+};
+
 const createFileOrFolderDeclaration: FunctionDeclaration = {
   name: 'createFileOrFolder',
   description:
@@ -322,6 +341,34 @@ const createFileOrFolderDeclaration: FunctionDeclaration = {
       },
     },
     required: ['targetPath', 'kind'],
+  },
+};
+
+const patchLocalFileDeclaration: FunctionDeclaration = {
+  name: 'patchLocalFile',
+  description:
+    'Surgically edit an existing file inside the host computer workspace by replacing an exact snippet without rewriting unrelated code.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      targetPath: {
+        type: Type.STRING,
+        description: 'Relative path to the existing file.',
+      },
+      findText: {
+        type: Type.STRING,
+        description: 'Exact existing snippet inside the file to replace.',
+      },
+      replaceText: {
+        type: Type.STRING,
+        description: 'Replacement snippet.',
+      },
+      replaceAll: {
+        type: Type.BOOLEAN,
+        description: 'Set true to replace all occurrences.',
+      },
+    },
+    required: ['targetPath', 'findText', 'replaceText'],
   },
 };
 
@@ -369,6 +416,26 @@ const deleteLocalPathDeclaration: FunctionDeclaration = {
       },
     },
     required: ['targetPath'],
+  },
+};
+
+const runComputerCommandDeclaration: FunctionDeclaration = {
+  name: 'runComputerCommand',
+  description:
+    'Execute a shell command (such as npm run build, tsc --noEmit, node script.js, python app.py, git status, tests) inside the host computer workspace root and inspect stdout/stderr.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      command: {
+        type: Type.STRING,
+        description: 'Shell command to execute inside the workspace.',
+      },
+      subDir: {
+        type: Type.STRING,
+        description: 'Optional relative subfolder to run the command inside.',
+      },
+    },
+    required: ['command'],
   },
 };
 
@@ -633,10 +700,13 @@ function mapToolToNode(toolName: string): ArixSatelliteKey {
     case 'inspectArixSourceFile':
     case 'editArixSourceFile':
       return 'code';
+    case 'listComputerFolder':
     case 'createFileOrFolder':
+    case 'patchLocalFile':
     case 'findLocalFiles':
     case 'readLocalFile':
     case 'deleteLocalPath':
+    case 'runComputerCommand':
     case 'inspectCloudflareDomain':
       return 'compute';
     case 'saveTaughtRule':
@@ -701,12 +771,22 @@ function formatToolStartDetail(
         title: 'Self-Code · Modifying',
         detail: `Updating ${String(args.filePath || 'source file')}...`,
       };
+    case 'listComputerFolder':
+      return {
+        title: 'Computer · Listing folder',
+        detail: `Listing "${String(args.subDir || '.')}"...`,
+      };
     case 'createFileOrFolder':
       return {
         title: 'Computer · Creating',
         detail: `Creating ${String(args.kind || 'file')} "${String(
           args.targetPath || ''
         )}"...`,
+      };
+    case 'patchLocalFile':
+      return {
+        title: 'Computer · Patching file',
+        detail: `Applying surgical edit to "${String(args.targetPath || '')}"...`,
       };
     case 'findLocalFiles':
       return {
@@ -722,6 +802,11 @@ function formatToolStartDetail(
       return {
         title: 'Computer · Deleting',
         detail: `Removing "${String(args.targetPath || '')}"...`,
+      };
+    case 'runComputerCommand':
+      return {
+        title: 'Terminal · Running command',
+        detail: `Running "${String(args.command || '').slice(0, 80)}"...`,
       };
     case 'inspectCloudflareDomain':
       return {
@@ -755,14 +840,20 @@ function formatToolStartDetail(
 
 function formatToolDoneTitle(toolName: string): string {
   switch (toolName) {
+    case 'listComputerFolder':
+      return 'Computer · Listed';
     case 'createFileOrFolder':
       return 'Computer · Saved';
+    case 'patchLocalFile':
+      return 'Computer · Patched';
     case 'findLocalFiles':
       return 'Computer · Search done';
     case 'readLocalFile':
       return 'Computer · File read';
     case 'deleteLocalPath':
       return 'Computer · Removed';
+    case 'runComputerCommand':
+      return 'Terminal · Command finished';
     case 'saveTaughtRule':
       return 'Memory · Rule learned';
     case 'createSelfSection':
@@ -1647,26 +1738,64 @@ async function startServer() {
           ? rawReasoningMode
           : 'balanced';
 
-      const parsedAttachments: Array<{
+      const parsedBinaryAttachments: Array<{
         attachment: ChatAttachment;
         mimeType: string;
         base64: string;
+      }> = [];
+      const parsedTextAttachments: Array<{
+        attachment: ChatAttachment;
+        textContent: string;
       }> = [];
 
       if (Array.isArray(attachments)) {
         for (const item of attachments.slice(0, 4)) {
           if (!item || typeof item !== 'object') continue;
+          const itemName =
+            typeof item.name === 'string' && item.name
+              ? item.name
+              : `attachment-${parsedBinaryAttachments.length + parsedTextAttachments.length + 1}`;
+          const itemId =
+            typeof item.id === 'string' && item.id
+              ? item.id
+              : `att-${Date.now()}-${parsedBinaryAttachments.length + parsedTextAttachments.length}`;
+
+          if (item.kind === 'text' || typeof item.textContent === 'string') {
+            const textContent = String(item.textContent || '').slice(0, 35000);
+            if (textContent) {
+              parsedTextAttachments.push({
+                attachment: {
+                  id: itemId,
+                  name: itemName,
+                  mimeType:
+                    typeof item.mimeType === 'string'
+                      ? item.mimeType
+                      : 'text/plain',
+                  kind: 'text',
+                  sizeBytes:
+                    typeof item.sizeBytes === 'number'
+                      ? item.sizeBytes
+                      : Buffer.byteLength(textContent, 'utf-8'),
+                },
+                textContent,
+              });
+            }
+            continue;
+          }
+
           const rawDataUrl =
             typeof item.dataUrl === 'string' ? item.dataUrl : '';
           const rawBase64 = typeof item.base64 === 'string' ? item.base64 : '';
           let mimeType =
-            typeof item.mimeType === 'string' && item.mimeType.startsWith('image/')
+            typeof item.mimeType === 'string' &&
+            (item.mimeType.startsWith('image/') ||
+              item.mimeType === 'application/pdf')
               ? item.mimeType
               : 'image/png';
           let base64 = rawBase64;
           let dataUrl = rawDataUrl;
 
-          if (!base64 && rawDataUrl.startsWith('data:image/')) {
+          if (!base64 && rawDataUrl.startsWith('data:')) {
             const commaIdx = rawDataUrl.indexOf(',');
             if (commaIdx > 0) {
               const header = rawDataUrl.slice(5, commaIdx);
@@ -1680,19 +1809,20 @@ async function startServer() {
             dataUrl = `data:${mimeType};base64,${base64}`;
           }
 
-          if (base64 && mimeType.startsWith('image/')) {
-            parsedAttachments.push({
+          if (
+            base64 &&
+            (mimeType.startsWith('image/') || mimeType === 'application/pdf')
+          ) {
+            const isPdf = mimeType === 'application/pdf';
+            parsedBinaryAttachments.push({
               attachment: {
-                id:
-                  typeof item.id === 'string' && item.id
-                    ? item.id
-                    : `att-${Date.now()}-${parsedAttachments.length}`,
-                name:
-                  typeof item.name === 'string' && item.name
-                    ? item.name
-                    : `image-${parsedAttachments.length + 1}.png`,
+                id: itemId,
+                name: itemName,
                 mimeType,
-                dataUrl,
+                kind: isPdf ? 'pdf' : 'image',
+                dataUrl: isPdf ? undefined : dataUrl,
+                sizeBytes:
+                  typeof item.sizeBytes === 'number' ? item.sizeBytes : undefined,
               },
               mimeType,
               base64,
@@ -1701,16 +1831,19 @@ async function startServer() {
         }
       }
 
-      if (!cleanMessage && parsedAttachments.length === 0) {
-        res
-          .status(400)
-          .json({ error: 'Please enter a message or attach an image.' });
+      const totalAttachmentCount =
+        parsedBinaryAttachments.length + parsedTextAttachments.length;
+
+      if (!cleanMessage && totalAttachmentCount === 0) {
+        res.status(400).json({
+          error: 'Please enter a message or attach an image, PDF, or file.',
+        });
         return;
       }
 
       const displayMessage =
         cleanMessage ||
-        `Sent ${parsedAttachments.length} image${parsedAttachments.length > 1 ? 's' : ''}`;
+        `Sent ${totalAttachmentCount} attachment${totalAttachmentCount > 1 ? 's' : ''}`;
 
       const state = getPublicState();
       const activeRules = state.rules.filter((r) => r.active);
@@ -1750,11 +1883,18 @@ async function startServer() {
           `FOCUSED ISSUE:\nTitle: ${targetIssue.title}\nPriority: ${targetIssue.priority} (${targetIssue.uxImpactScore}/100)\nArea: ${targetIssue.affectedArea}\nEvidence: ${targetIssue.evidence}\nSolution: ${targetIssue.solutionSummary}`
         );
       }
+      if (parsedTextAttachments.length > 0) {
+        for (const tAtt of parsedTextAttachments) {
+          contextParts.push(
+            `ATTACHED FILE "${tAtt.attachment.name}" (${tAtt.attachment.mimeType}):\n\`\`\`\n${tAtt.textContent}\n\`\`\``
+          );
+        }
+      }
 
       const recentHistory = state.chatHistory.slice(-10).map((m) => {
         const attachmentNote =
           m.attachments && m.attachments.length > 0
-            ? ` [Attached ${m.attachments.length} image(s): ${m.attachments.map((a) => a.name).join(', ')}]`
+            ? ` [Attached ${m.attachments.length} file(s): ${m.attachments.map((a) => a.name).join(', ')}]`
             : '';
         const clipped =
           m.content.length > 2600
@@ -1768,7 +1908,7 @@ async function startServer() {
 
       const effectivePromptText =
         cleanMessage ||
-        'Inspect the attached image(s) in detail, explain what you see, and provide solutions or next steps.';
+        'Inspect the attached file(s)/image(s) in detail, explain what you see, and provide complete solutions or next steps.';
 
       const userTurnText =
         contextParts.length > 0
@@ -1776,7 +1916,7 @@ async function startServer() {
           : effectivePromptText;
 
       const userTurnParts: Part[] = [
-        ...parsedAttachments.map((a) => ({
+        ...parsedBinaryAttachments.map((a) => ({
           inlineData: {
             mimeType: a.mimeType,
             data: a.base64,
@@ -1793,10 +1933,14 @@ async function startServer() {
       )}
 
 AVAILABLE LIVE TOOLS:
-- \`createFileOrFolder\`: Create files or folders on the computer workspace (${rootDir}).
+- \`listComputerFolder\`: List files and folders inside any directory of the computer workspace (${rootDir}).
+- \`createFileOrFolder\`: Create files or folders on the computer workspace.
+- \`patchLocalFile\`: Surgically edit an existing file via exact search-and-replace without losing unrelated code.
 - \`findLocalFiles\`: Search files and folders by name or content on the computer workspace.
 - \`readLocalFile\`: Read a local file's content.
 - \`deleteLocalPath\`: Delete a local file or folder.
+- \`runComputerCommand\`: Execute shell commands (\`npm run build\`, \`tsc --noEmit\`, \`node ...\`, \`python ...\`, \`git status\`, tests) in ${rootDir} to verify and run code.
+- \`googleSearch\`: Built-in Google Search grounding for real-time documentation, news, package versions, and web facts.
 - \`sendToTelegram\`: Send messages directly to a connected Telegram bot/chat.
 - \`saveTaughtRule\`: Permanently save any rule, coding pattern, or skill the owner teaches you.
 - \`inspectConnectedSite\`: Fetch live HTML/headers/status from any URL.
@@ -1817,12 +1961,16 @@ ${
 }`;
 
       const tools = [
+        { googleSearch: {} },
         {
           functionDeclarations: [
+            listComputerFolderDeclaration,
             createFileOrFolderDeclaration,
+            patchLocalFileDeclaration,
             findLocalFilesDeclaration,
             readLocalFileDeclaration,
             deleteLocalPathDeclaration,
+            runComputerCommandDeclaration,
             sendToTelegramDeclaration,
             saveTaughtRuleDeclaration,
             createSelfSectionDeclaration,
@@ -1838,6 +1986,7 @@ ${
           ],
         },
       ];
+      const toolConfig = { includeServerSideToolInvocations: true };
 
       let conversationContents: Array<{ role: 'user' | 'model'; parts: Part[] }> = [
         ...recentHistory,
@@ -1847,6 +1996,7 @@ ${
       const newlyLearnedRules: TaughtRule[] = [];
       const toolsInvoked: string[] = [];
       const collectedThoughts: string[] = [];
+      const collectedSourcesMap = new Map<string, ChatSource>();
       let finalReply = '';
       let lastActiveNode: ArixSatelliteKey = 'core';
 
@@ -1881,10 +2031,27 @@ ${
           config: {
             systemInstruction,
             tools,
+            toolConfig,
             thinkingConfig:
               step === 0 ? primaryThinkingConfig : followUpThinkingConfig,
           },
         });
+
+        const groundingChunks =
+          response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+        if (Array.isArray(groundingChunks)) {
+          for (const chunk of groundingChunks) {
+            const web = (
+              chunk as { web?: { uri?: string; title?: string } }
+            ).web;
+            if (web?.uri && !collectedSourcesMap.has(web.uri)) {
+              collectedSourcesMap.set(web.uri, {
+                title: web.title || web.uri,
+                url: web.uri,
+              });
+            }
+          }
+        }
 
         const extracted = extractAnswerAndThoughts(response);
         if (extracted.thoughts) {
@@ -1934,7 +2101,19 @@ ${
           });
 
           try {
-            if (toolName === 'createFileOrFolder') {
+            if (toolName === 'listComputerFolder') {
+              const listed = listComputerEntries(
+                rootDir,
+                String(args.subDir || '')
+              );
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: { ok: true, computerRoot: rootDir, ...listed },
+                },
+              });
+            } else if (toolName === 'createFileOrFolder') {
               const out = createFileOrFolder(rootDir, {
                 targetPath: String(args.targetPath || ''),
                 kind: args.kind === 'folder' ? 'folder' : 'file',
@@ -1946,6 +2125,20 @@ ${
                   id: call.id,
                   name: toolName,
                   response: { ok: true, ...out, computerRoot: rootDir },
+                },
+              });
+            } else if (toolName === 'patchLocalFile') {
+              const patched = patchLocalFile(rootDir, {
+                targetPath: String(args.targetPath || ''),
+                findText: String(args.findText ?? ''),
+                replaceText: String(args.replaceText ?? ''),
+                replaceAll: Boolean(args.replaceAll),
+              });
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: { ok: true, ...patched, computerRoot: rootDir },
                 },
               });
             } else if (toolName === 'findLocalFiles') {
@@ -1982,6 +2175,19 @@ ${
                   id: call.id,
                   name: toolName,
                   response: { ok: true, ...del },
+                },
+              });
+            } else if (toolName === 'runComputerCommand') {
+              const cmdRes = await runComputerCommand(
+                rootDir,
+                String(args.command || ''),
+                args.subDir ? String(args.subDir) : ''
+              );
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: cmdRes,
                 },
               });
             } else if (toolName === 'sendToTelegram') {
@@ -2542,15 +2748,22 @@ ${
           ? collectedThoughts.join('\n\n').trim()
           : undefined;
 
+      const savedAttachments: ChatAttachment[] = [
+        ...parsedBinaryAttachments.map((a) => a.attachment),
+        ...parsedTextAttachments.map((a) => a.attachment),
+      ];
+
+      const collectedSources = Array.from(collectedSourcesMap.values()).slice(
+        0,
+        8
+      );
+
       const appliedRulesUsed = activeRules.map((r) => r.title);
       const userMsg: ChatMessage = {
         id: `msg-${Date.now()}-u`,
         role: 'user',
         content: displayMessage,
-        attachments:
-          parsedAttachments.length > 0
-            ? parsedAttachments.map((a) => a.attachment)
-            : undefined,
+        attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
         timestamp: new Date().toISOString(),
         auditId: targetAudit?.id,
         issueId: targetIssue?.id,
@@ -2560,6 +2773,7 @@ ${
         id: `msg-${Date.now()}-a`,
         role: 'arix',
         content: finalReply,
+        sources: collectedSources.length > 0 ? collectedSources : undefined,
         thinkingSummary,
         reasoningMode,
         timestamp: new Date().toISOString(),

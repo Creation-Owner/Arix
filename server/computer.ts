@@ -240,3 +240,118 @@ export function deleteLocalPath(
   fs.rmSync(absolute, { recursive: true, force: true });
   return { deletedPath: relative, kind };
 }
+
+export function patchLocalFile(
+  rootDir: string,
+  params: {
+    targetPath: string;
+    findText: string;
+    replaceText: string;
+    replaceAll?: boolean;
+  }
+): { patchedPath: string; replacements: number; sizeBytes: number } {
+  const { absolute, relative } = resolveSafeSubpath(rootDir, params.targetPath);
+  if (!fs.existsSync(absolute)) {
+    throw new Error(`File not found: ${relative}`);
+  }
+  const stat = fs.statSync(absolute);
+  if (stat.isDirectory()) {
+    throw new Error(`"${relative}" is a folder, not a file.`);
+  }
+  const findText = String(params.findText ?? '');
+  if (!findText) {
+    throw new Error('findText cannot be empty.');
+  }
+  const original = fs.readFileSync(absolute, 'utf-8');
+  if (!original.includes(findText)) {
+    throw new Error(
+      `Could not find exact target snippet inside "${relative}". Read the file first to verify exact text.`
+    );
+  }
+
+  let updated = original;
+  let replacements = 0;
+  if (params.replaceAll) {
+    const parts = original.split(findText);
+    replacements = parts.length - 1;
+    updated = parts.join(String(params.replaceText ?? ''));
+  } else {
+    replacements = 1;
+    updated = original.replace(findText, String(params.replaceText ?? ''));
+  }
+
+  fs.writeFileSync(absolute, updated, 'utf-8');
+  return {
+    patchedPath: relative,
+    replacements,
+    sizeBytes: Buffer.byteLength(updated, 'utf-8'),
+  };
+}
+
+export async function runComputerCommand(
+  rootDir: string,
+  command: string,
+  subDir = '',
+  timeoutMs = 30000
+): Promise<{
+  ok: boolean;
+  cwd: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}> {
+  const cleanCmd = String(command || '').trim();
+  if (!cleanCmd) {
+    throw new Error('Command cannot be empty.');
+  }
+
+  // Block destructive system-wide commands
+  const lower = cleanCmd.toLowerCase();
+  const blockedPatterns = [
+    /\brm\s+-rf\s+\/(\s|$)/i,
+    /\bformat\s+[a-z]:/i,
+    /\bdel\s+\/[sqf].*\b[a-z]:\\/i,
+    /\bshutdown\b/i,
+    /\breboot\b/i,
+    /\bmkfs\b/i,
+  ];
+  if (blockedPatterns.some((re) => re.test(lower))) {
+    throw new Error('Destructive system-level command blocked for safety.');
+  }
+
+  const { absolute: cwdAbs, relative: cwdRel } = resolveSafeSubpath(
+    rootDir,
+    subDir
+  );
+  if (!fs.existsSync(cwdAbs) || !fs.statSync(cwdAbs).isDirectory()) {
+    throw new Error(`Working directory not found: ${cwdRel}`);
+  }
+
+  const { exec } = await import('child_process');
+
+  return new Promise((resolve) => {
+    exec(
+      cleanCmd,
+      {
+        cwd: cwdAbs,
+        timeout: Math.min(Math.max(timeoutMs, 1000), 60000),
+        maxBuffer: 1024 * 1024 * 2,
+      },
+      (err, stdout, stderr) => {
+        const exitCode =
+          err && typeof (err as { code?: unknown }).code === 'number'
+            ? ((err as { code: number }).code ?? 1)
+            : err
+              ? 1
+              : 0;
+        resolve({
+          ok: !err,
+          cwd: cwdRel,
+          exitCode,
+          stdout: String(stdout || '').slice(0, 12000),
+          stderr: String(stderr || '').slice(0, 8000),
+        });
+      }
+    );
+  });
+}
