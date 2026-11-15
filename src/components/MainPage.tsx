@@ -535,25 +535,9 @@ export function MainPage({
             </button>
           </form>
 
-          {/* Quick Command Presets */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-slate-400 mr-1">Try live:</span>
-            {quickCommands.map((cmd) => (
-              <button
-                key={cmd}
-                type="button"
-                disabled={sendingCommand}
-                onClick={() => onSendCommand(cmd)}
-                className="px-3 py-1.5 text-xs text-slate-200 bg-[#0B152B] hover:bg-slate-800 border border-slate-800 hover:border-sky-500/50 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
-              >
-                {cmd}
-              </button>
-            ))}
-          </div>
-
-          {/* Live Step Trail + Latest Reply */}
-          {(recentEvents.length > 0 || latestArixReply) && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 pt-2">
+          {/* Live Step Trail + Latest Reply (Placed directly below command bar, never truncated) */}
+          {(sendingCommand || recentEvents.length > 0 || latestArixReply) && (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
               {recentEvents.length > 0 && (
                 <div className="lg:col-span-5 bg-[#060E1F] border border-slate-800 rounded-xl p-4 space-y-2">
                   <div className="text-xs font-semibold text-sky-300">
@@ -567,7 +551,7 @@ export function MainPage({
                       >
                         <div className="min-w-0">
                           <div
-                            className={`font-medium truncate ${
+                            className={`font-medium break-words ${
                               ev.phase === 'error'
                                 ? 'text-red-300'
                                 : ev.phase === 'done' || ev.phase === 'tool_done'
@@ -577,7 +561,7 @@ export function MainPage({
                           >
                             {ev.title}
                           </div>
-                          <div className="text-slate-400 truncate font-mono text-[11px]">
+                          <div className="text-slate-400 break-words font-mono text-[11px]">
                             {ev.detail}
                           </div>
                         </div>
@@ -594,15 +578,21 @@ export function MainPage({
                 </div>
               )}
 
-              {latestArixReply && (
+              {(sendingCommand || latestArixReply) && (
                 <div
                   className={`${
                     recentEvents.length > 0 ? 'lg:col-span-7' : 'lg:col-span-12'
-                  } bg-[#060E1F] border border-slate-800 rounded-xl p-4 space-y-2`}
+                  } bg-[#060E1F] border border-sky-500/30 rounded-xl p-4 space-y-2.5`}
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-semibold text-white">
-                      Latest Arix Response
+                    <span className="text-xs font-semibold text-white flex items-center gap-2">
+                      <span>Latest Arix Response</span>
+                      {sendingCommand && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-normal text-sky-300">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          <span>Thinking...</span>
+                        </span>
+                      )}
                     </span>
                     <div className="flex items-center gap-2">
                       <select
@@ -619,64 +609,90 @@ export function MainPage({
                           </option>
                         ))}
                       </select>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void playArixSpeech({
-                            id: latestArixReply.id,
-                            text: latestArixReply.content,
-                            voiceName,
-                          })
-                        }
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md border cursor-pointer ${
-                          voiceState.playingId === latestArixReply.id ||
-                          voiceState.loadingId === latestArixReply.id
-                            ? 'bg-sky-500 text-slate-950 border-sky-400 font-semibold'
-                            : 'bg-[#0B152B] border-slate-700 text-slate-200 hover:border-sky-500/60'
-                        }`}
-                      >
-                        {voiceState.loadingId === latestArixReply.id ? (
-                          <>
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                            <span>Loading</span>
-                          </>
-                        ) : voiceState.playingId === latestArixReply.id ? (
-                          <>
-                            <Square className="w-3 h-3 fill-current" />
-                            <span>Stop</span>
-                          </>
-                        ) : (
-                          <>
-                            <Volume2 className="w-3 h-3" />
-                            <span>Speak</span>
-                          </>
-                        )}
-                      </button>
+                      {latestArixReply && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void playArixSpeech({
+                              id: latestArixReply.id,
+                              text: latestArixReply.content,
+                              voiceName,
+                            })
+                          }
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md border cursor-pointer ${
+                            voiceState.playingId === latestArixReply.id ||
+                            voiceState.loadingId === latestArixReply.id
+                              ? 'bg-sky-500 text-slate-950 border-sky-400 font-semibold'
+                              : 'bg-[#0B152B] border-slate-700 text-slate-200 hover:border-sky-500/60'
+                          }`}
+                        >
+                          {voiceState.loadingId === latestArixReply.id ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              <span>Loading</span>
+                            </>
+                          ) : voiceState.playingId === latestArixReply.id ? (
+                            <>
+                              <Square className="w-3 h-3 fill-current" />
+                              <span>Stop</span>
+                            </>
+                          ) : (
+                            <>
+                              <Volume2 className="w-3 h-3" />
+                              <span>Speak</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => onNavigate('ask')}
                         className="text-xs text-sky-400 hover:underline cursor-pointer"
                       >
-                        Continue in Chat
+                        Open Full Chat
                       </button>
                     </div>
                   </div>
-                  <p className="text-xs sm:text-sm text-slate-200 leading-relaxed whitespace-pre-wrap line-clamp-4">
-                    {latestArixReply.content}
-                  </p>
-                  {latestArixReply.toolsInvoked &&
-                    latestArixReply.toolsInvoked.length > 0 && (
-                      <div className="flex items-center gap-1.5 text-[11px] text-sky-400 font-mono">
-                        <Wrench className="w-3 h-3 shrink-0" />
-                        <span>
-                          {latestArixReply.toolsInvoked.join(' · ')}
-                        </span>
+                  {latestArixReply ? (
+                    <>
+                      <div className="text-xs sm:text-sm text-slate-200 leading-relaxed whitespace-pre-wrap max-h-[380px] overflow-y-auto pr-1">
+                        {latestArixReply.content}
                       </div>
-                    )}
+                      {latestArixReply.toolsInvoked &&
+                        latestArixReply.toolsInvoked.length > 0 && (
+                          <div className="flex items-center gap-1.5 text-[11px] text-sky-400 font-mono pt-1 border-t border-slate-800/80">
+                            <Wrench className="w-3 h-3 shrink-0" />
+                            <span>
+                              {latestArixReply.toolsInvoked.join(' · ')}
+                            </span>
+                          </div>
+                        )}
+                    </>
+                  ) : (
+                    <p className="text-xs text-slate-400">
+                      Arix is processing your command...
+                    </p>
+                  )}
                 </div>
               )}
             </div>
           )}
+
+          {/* Quick Command Presets */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-slate-400 mr-1">Try live:</span>
+            {quickCommands.map((cmd) => (
+              <button
+                key={cmd}
+                type="button"
+                disabled={sendingCommand}
+                onClick={() => onSendCommand(cmd)}
+                className="px-3 py-1.5 text-xs text-slate-200 bg-[#0B152B] hover:bg-slate-800 border border-slate-800 hover:border-sky-500/50 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                {cmd}
+              </button>
+            ))}
+          </div>
         </div>
       </section>
 

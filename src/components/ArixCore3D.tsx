@@ -998,7 +998,7 @@ export function ArixCore3D({
             />
             <span>{activeHeadline}</span>
           </div>
-          <p className="mt-1 text-xs text-slate-300 font-mono truncate">
+          <p className="mt-1 text-xs text-slate-300 font-mono break-words leading-snug">
             {activeDetail}
           </p>
         </div>

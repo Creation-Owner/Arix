@@ -14,6 +14,7 @@ import {
 import {
   ARIX_MODEL,
   extractAnswerAndThoughts,
+  generateContentWithRetry,
   getGeminiClient,
 } from './server/gemini.ts';
 import { analyzeHtmlSignals, scrapeWebsite } from './server/scraper.ts';
@@ -182,7 +183,7 @@ function formatGeminiError(err: unknown): { status: number; message: string } {
     return {
       status: 429,
       message:
-        'Gemini API rate limit or quota reached. Please wait a moment and try again.',
+        'Google Gemini API key quota reached (Arix itself has no limits). Wait a few seconds and retry, or use a billing-enabled GEMINI_API_KEY in .env / Settings > Secrets.',
     };
   }
   return { status: 500, message: raw || 'Unexpected error calling Arix AI.' };
@@ -1456,7 +1457,7 @@ async function startServer() {
 
         if (!htmlExcerpt || textExcerpt.length < 250) {
           try {
-            const urlResp = await ai.models.generateContent({
+            const urlResp = await generateContentWithRetry(ai, {
               model: ARIX_MODEL,
               contents: `Inspect the webpage at ${targetLabel}. Describe its layout, navigation, headings, forms, CTAs, visible errors, loading/performance clues, and UX issues.`,
               config: { tools: [{ urlContext: {} }] },
@@ -1527,15 +1528,17 @@ async function startServer() {
       }
       parts.push({ text: promptSections.join('\n\n') });
 
-      const response: GenerateContentResponse = await ai.models.generateContent({
-        model: ARIX_MODEL,
-        contents: { parts },
-        config: {
-          systemInstruction,
-          thinkingConfig: {
-            thinkingLevel: ThinkingLevel.HIGH,
-          },
-          responseMimeType: 'application/json',
+      const response: GenerateContentResponse = await generateContentWithRetry(
+        ai,
+        {
+          model: ARIX_MODEL,
+          contents: { parts },
+          config: {
+            systemInstruction,
+            thinkingConfig: {
+              thinkingLevel: ThinkingLevel.HIGH,
+            },
+            responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
             properties: {
@@ -1603,8 +1606,9 @@ async function startServer() {
               'issues',
             ],
           },
-        },
-      });
+          },
+        }
+      );
 
       const parsed = JSON.parse(response.text || '{}') as {
         targetLabel?: string;
@@ -1891,14 +1895,14 @@ async function startServer() {
         }
       }
 
-      const recentHistory = state.chatHistory.slice(-10).map((m) => {
+      const recentHistory = state.chatHistory.slice(-6).map((m) => {
         const attachmentNote =
           m.attachments && m.attachments.length > 0
             ? ` [Attached ${m.attachments.length} file(s): ${m.attachments.map((a) => a.name).join(', ')}]`
             : '';
         const clipped =
-          m.content.length > 2600
-            ? `${m.content.slice(0, 2600)}\n...[truncated]`
+          m.content.length > 1600
+            ? `${m.content.slice(0, 1600)}\n...[truncated]`
             : m.content;
         return {
           role: m.role === 'user' ? ('user' as const) : ('model' as const),
@@ -2025,17 +2029,30 @@ ${
       });
 
       for (let step = 0; step < 8; step++) {
-        const response = await ai.models.generateContent({
-          model: ARIX_MODEL,
-          contents: conversationContents,
-          config: {
-            systemInstruction,
-            tools,
-            toolConfig,
-            thinkingConfig:
-              step === 0 ? primaryThinkingConfig : followUpThinkingConfig,
+        const response = await generateContentWithRetry(
+          ai,
+          {
+            model: ARIX_MODEL,
+            contents: conversationContents,
+            config: {
+              systemInstruction,
+              tools,
+              toolConfig,
+              thinkingConfig:
+                step === 0 ? primaryThinkingConfig : followUpThinkingConfig,
+            },
           },
-        });
+          {
+            onRetry: (reason) => {
+              emitArixActivity({
+                phase: 'thinking',
+                node: 'core',
+                title: 'Arix Core · Auto-Retrying',
+                detail: reason,
+              });
+            },
+          }
+        );
 
         const groundingChunks =
           response.candidates?.[0]?.groundingMetadata?.groundingChunks;
@@ -2708,7 +2725,7 @@ ${
 
       if (!finalReply && toolsInvoked.length > 0) {
         try {
-          const synthesisResp = await ai.models.generateContent({
+          const synthesisResp = await generateContentWithRetry(ai, {
             model: ARIX_MODEL,
             contents: [
               ...conversationContents,
@@ -2859,33 +2876,37 @@ ${
         detail: `Generating speech (${spokenText.slice(0, 60)}...)`,
       });
 
-      const ttsResponse = await ai.models.generateContent({
-        model: 'gemini-3.8-flash-lite-tts',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: spokenText,
-                speechMetadata: {
-                  style:
-                    typeof style === 'string' && style.trim()
-                      ? style.trim()
-                      : 'Clear, natural, expressive personal AI assistant',
+      const ttsResponse = await generateContentWithRetry(
+        ai,
+        {
+          model: 'gemini-3.8-flash-lite-tts',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: spokenText,
+                  speechMetadata: {
+                    style:
+                      typeof style === 'string' && style.trim()
+                        ? style.trim()
+                        : 'Clear, natural, expressive personal AI assistant',
+                  },
                 },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName },
               },
-            ],
-          },
-        ],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
             },
           },
         },
-      });
+        { allowFallback: false }
+      );
 
       const parts = ttsResponse.candidates?.[0]?.content?.parts || [];
       let audioBase64 = '';
@@ -2962,7 +2983,7 @@ ${
         detail: 'Transcribing your voice command...',
       });
 
-      const transcribeRes = await ai.models.generateContent({
+      const transcribeRes = await generateContentWithRetry(ai, {
         model: 'gemini-3.5-transcribe',
         contents: {
           parts: [
