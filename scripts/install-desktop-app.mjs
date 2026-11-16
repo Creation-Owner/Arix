@@ -57,12 +57,24 @@ if (process.platform === 'win32') {
 
   if (fs.existsSync(electronExe)) {
     try {
-      const psScript = `$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut("$env:USERPROFILE\\Desktop\\Arix.lnk"); $Shortcut.TargetPath = "${electronExe.replace(/"/g, '')}"; $Shortcut.Arguments = '"${mainCjs.replace(/"/g, '')}"'; $Shortcut.WorkingDirectory = "${root.replace(/"/g, '')}"; $Shortcut.Save()`;
+      const safeElectron = electronExe.replace(/'/g, "''");
+      const safeMain = mainCjs.replace(/'/g, "''");
+      const safeRoot = root.replace(/'/g, "''");
+      const psLines = [
+        "$desktop = [Environment]::GetFolderPath('Desktop')",
+        "$wsh = New-Object -ComObject WScript.Shell",
+        "$sc = $wsh.CreateShortcut((Join-Path $desktop 'Arix.lnk'))",
+        `$sc.TargetPath = '${safeElectron}'`,
+        `$sc.Arguments = '"${safeMain}"'`,
+        `$sc.WorkingDirectory = '${safeRoot}'`,
+        '$sc.Save()',
+        "Write-Host ('Created Desktop shortcut: ' + (Join-Path $desktop 'Arix.lnk'))",
+      ].join('; ');
+      const encoded = Buffer.from(psLines, 'utf16le').toString('base64');
       execSync(
-        `powershell -NoProfile -ExecutionPolicy Bypass -Command "${psScript.replace(/"/g, '\\"')}"`,
-        { stdio: 'ignore' }
+        `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
+        { stdio: 'inherit' }
       );
-      console.log('Created Desktop shortcut: Arix.lnk');
     } catch {
       // Ignore shortcut creation errors on locked desktops
     }

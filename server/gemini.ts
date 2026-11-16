@@ -14,7 +14,7 @@ export function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error(
-      'GEMINI_API_KEY is not configured. Please verify your API key in Settings > Secrets.'
+      'GEMINI_API_KEY is missing in your .env environment configuration.'
     );
   }
   if (!cachedClient) {
@@ -47,6 +47,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function stripGoogleSearchFromConfig(
+  config: GenerateContentParameters['config'] | undefined
+): GenerateContentParameters['config'] | undefined {
+  if (!config) return undefined;
+  const next = { ...config };
+  if (Array.isArray(next.tools)) {
+    const filtered = next.tools.filter(
+      (t) => !(t && typeof t === 'object' && 'googleSearch' in t)
+    );
+    next.tools = filtered.length > 0 ? filtered : undefined;
+  }
+  if (next.toolConfig && 'includeServerSideToolInvocations' in next.toolConfig) {
+    const restToolConfig = { ...next.toolConfig };
+    delete (restToolConfig as Record<string, unknown>)
+      .includeServerSideToolInvocations;
+    next.toolConfig =
+      Object.keys(restToolConfig).length > 0 ? restToolConfig : undefined;
+  }
+  if (next.thinkingConfig) {
+    next.thinkingConfig = {
+      thinkingLevel: ThinkingLevel.LOW,
+    };
+  }
+  return next;
+}
+
 export async function generateContentWithRetry(
   ai: GoogleGenAI,
   params: GenerateContentParameters,
@@ -64,9 +90,9 @@ export async function generateContentWithRetry(
       throw firstErr;
     }
 
-    // Brief exponential backoff retry on transient rate bursts
-    options?.onRetry?.('Retrying after brief API pause...');
-    await sleep(1600);
+    // Brief backoff retry on transient rate bursts
+    options?.onRetry?.('Retrying after brief pause...');
+    await sleep(1400);
     try {
       return await ai.models.generateContent(params);
     } catch (secondErr) {
@@ -74,19 +100,32 @@ export async function generateContentWithRetry(
         throw secondErr;
       }
 
-      if (allowFallback && params.model !== ARIX_FALLBACK_MODEL) {
-        options?.onRetry?.('Switching to high-throughput Gemini Flash Lite...');
-        const fallbackConfig = params.config ? { ...params.config } : undefined;
-        if (fallbackConfig?.thinkingConfig) {
-          fallbackConfig.thinkingConfig = {
-            thinkingLevel: ThinkingLevel.LOW,
-          };
+      if (allowFallback) {
+        options?.onRetry?.('Switching to fast Gemini Flash Lite...');
+        const fallbackConfig = stripGoogleSearchFromConfig(params.config);
+        try {
+          return await ai.models.generateContent({
+            ...params,
+            model: ARIX_FALLBACK_MODEL,
+            config: fallbackConfig,
+          });
+        } catch (thirdErr) {
+          if (!isRateLimitOrTransientError(thirdErr)) {
+            throw thirdErr;
+          }
+          // Last-resort lightweight fallback without heavy tool schemas to stay under TPM limits
+          if (fallbackConfig?.tools) {
+            const leanConfig = { ...fallbackConfig };
+            delete leanConfig.tools;
+            delete leanConfig.toolConfig;
+            return await ai.models.generateContent({
+              ...params,
+              model: ARIX_FALLBACK_MODEL,
+              config: leanConfig,
+            });
+          }
+          throw thirdErr;
         }
-        return await ai.models.generateContent({
-          ...params,
-          model: ARIX_FALLBACK_MODEL,
-          config: fallbackConfig,
-        });
       }
 
       throw secondErr;

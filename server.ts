@@ -158,32 +158,34 @@ OPERATING & REASONING PRINCIPLES:
 
 function formatGeminiError(err: unknown): { status: number; message: string } {
   const raw = err instanceof Error ? err.message : String(err);
-  if (raw.includes('API_KEY_INVALID') || raw.includes('400')) {
+  if (
+    raw.includes('API_KEY_INVALID') ||
+    raw.includes('API key not valid') ||
+    raw.includes('API key should be set')
+  ) {
     return {
       status: 400,
-      message:
-        'Gemini API key appears invalid. Please verify your key in Settings > Secrets.',
+      message: 'The configured GEMINI_API_KEY in .env was rejected by Google.',
     };
   }
-  if (raw.includes('PERMISSION_DENIED') || raw.includes('403')) {
+  if (raw.includes('PERMISSION_DENIED') || raw.includes('ACCESS_TOKEN_SCOPE')) {
     return {
       status: 403,
-      message:
-        'Permission denied by Gemini API. Please check your API key in Settings > Secrets.',
+      message: 'Permission denied by Google AI servers for this request.',
     };
   }
-  if (raw.includes('NOT_FOUND') || raw.includes('404')) {
+  if (raw.includes('NOT_FOUND')) {
     return {
       status: 404,
       message:
         'Requested Gemini model was not found or is unsupported. Verify ARIX_MODEL in server/gemini.ts.',
     };
   }
-  if (raw.includes('RESOURCE_EXHAUSTED') || raw.includes('429')) {
+  if (raw.includes('RESOURCE_EXHAUSTED') || raw.includes('"code":429')) {
     return {
       status: 429,
       message:
-        'Google Gemini API key quota reached (Arix itself has no limits). Wait a few seconds and retry, or use a billing-enabled GEMINI_API_KEY in .env / Settings > Secrets.',
+        'Google AI servers are temporarily busy (your current Google plan quota limit was reached). Wait 10–15 seconds and send your message again.',
     };
   }
   return { status: 500, message: raw || 'Unexpected error calling Arix AI.' };
@@ -1964,33 +1966,39 @@ ${
     : 'None yet.'
 }`;
 
-      const tools = [
-        { googleSearch: {} },
-        {
-          functionDeclarations: [
-            listComputerFolderDeclaration,
-            createFileOrFolderDeclaration,
-            patchLocalFileDeclaration,
-            findLocalFilesDeclaration,
-            readLocalFileDeclaration,
-            deleteLocalPathDeclaration,
-            runComputerCommandDeclaration,
-            sendToTelegramDeclaration,
-            saveTaughtRuleDeclaration,
-            createSelfSectionDeclaration,
-            updateSelfSectionDeclaration,
-            deleteSelfSectionDeclaration,
-            createPresentationDeclaration,
-            inspectArixSourceFileDeclaration,
-            editArixSourceFileDeclaration,
-            inspectConnectedSiteDeclaration,
-            inspectGitHubRepoDeclaration,
-            writeGitHubFileDeclaration,
-            inspectCloudflareDomainDeclaration,
-          ],
-        },
+      const needsWebSearch =
+        /\b(search|google|latest|news|today|current|price|version|release|docs|documentation|who is|what happened|2025|2026)\b/i.test(
+          cleanMessage
+        );
+
+      const functionDeclarations = [
+        listComputerFolderDeclaration,
+        createFileOrFolderDeclaration,
+        patchLocalFileDeclaration,
+        findLocalFilesDeclaration,
+        readLocalFileDeclaration,
+        deleteLocalPathDeclaration,
+        runComputerCommandDeclaration,
+        sendToTelegramDeclaration,
+        saveTaughtRuleDeclaration,
+        createSelfSectionDeclaration,
+        updateSelfSectionDeclaration,
+        deleteSelfSectionDeclaration,
+        createPresentationDeclaration,
+        inspectArixSourceFileDeclaration,
+        editArixSourceFileDeclaration,
+        inspectConnectedSiteDeclaration,
+        inspectGitHubRepoDeclaration,
+        writeGitHubFileDeclaration,
+        inspectCloudflareDomainDeclaration,
       ];
-      const toolConfig = { includeServerSideToolInvocations: true };
+
+      const tools = needsWebSearch
+        ? [{ googleSearch: {} }, { functionDeclarations }]
+        : [{ functionDeclarations }];
+      const toolConfig = needsWebSearch
+        ? { includeServerSideToolInvocations: true }
+        : undefined;
 
       let conversationContents: Array<{ role: 'user' | 'model'; parts: Part[] }> = [
         ...recentHistory,
