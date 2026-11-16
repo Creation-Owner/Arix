@@ -42,10 +42,31 @@ console.log('\n2/3 Building Arix production app...');
 execSync('npm run build', { stdio: 'inherit' });
 
 if (process.platform === 'win32') {
+  const electronExe = path.join(
+    root,
+    'node_modules',
+    'electron',
+    'dist',
+    'electron.exe'
+  );
+  const mainCjs = path.join(root, 'electron', 'main.cjs');
   const batPath = path.join(root, 'Launch-Arix.bat');
-  const batContent = `@echo off\r\ncd /d "%~dp0"\r\nnpx electron electron/main.cjs\r\n`;
+  const batContent = `@echo off\r\ncd /d "%~dp0"\r\nstart "" "%~dp0node_modules\\electron\\dist\\electron.exe" "%~dp0electron\\main.cjs"\r\n`;
   fs.writeFileSync(batPath, batContent, 'utf8');
   console.log(`\nCreated Windows double-click launcher: ${batPath}`);
+
+  if (fs.existsSync(electronExe)) {
+    try {
+      const psScript = `$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut("$env:USERPROFILE\\Desktop\\Arix.lnk"); $Shortcut.TargetPath = "${electronExe.replace(/"/g, '')}"; $Shortcut.Arguments = '"${mainCjs.replace(/"/g, '')}"'; $Shortcut.WorkingDirectory = "${root.replace(/"/g, '')}"; $Shortcut.Save()`;
+      execSync(
+        `powershell -NoProfile -ExecutionPolicy Bypass -Command "${psScript.replace(/"/g, '\\"')}"`,
+        { stdio: 'ignore' }
+      );
+      console.log('Created Desktop shortcut: Arix.lnk');
+    } catch {
+      // Ignore shortcut creation errors on locked desktops
+    }
+  }
 }
 
 console.log('\n3/3 Launching Arix Standalone Desktop App...');
