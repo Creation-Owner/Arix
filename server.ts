@@ -4,9 +4,12 @@ import http from 'http';
 import path from 'path';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
+import { WebSocketServer, type WebSocket as WsSocket } from 'ws';
 import {
   FunctionDeclaration,
   GenerateContentResponse,
+  Modality,
+  type LiveServerMessage,
   Part,
   ThinkingLevel,
   Type,
@@ -39,17 +42,20 @@ import {
   addConnection,
   addCustomSection,
   addRule,
+  addScheduledTask,
   appendChatMessages,
   clearChatHistory,
   deleteAudit,
   deleteConnection,
   deleteCustomSection,
   deleteRule,
+  deleteScheduledTask,
   exportPortableBrain,
   getActiveComputerRoot,
   getConnectionToken,
   getCustomSections,
   getPublicState,
+  getScheduledTasks,
   importPortableBrain,
   resetRulesToZero,
   saveAudit,
@@ -59,6 +65,7 @@ import {
   updateIssueStatus,
   updatePersona,
   updateRule,
+  updateScheduledTask,
 } from './server/store.ts';
 import {
   editArixSourceFile,
@@ -83,6 +90,8 @@ import type {
   ReasoningMode,
   RuleCategory,
   RuleWeight,
+  ScheduledTask,
+  ScheduledTaskAction,
   TaughtRule,
   TechnicalSignals,
   WebsiteAudit,
@@ -669,6 +678,125 @@ const createPresentationDeclaration: FunctionDeclaration = {
   },
 };
 
+const searchGoogleMapsDeclaration: FunctionDeclaration = {
+  name: 'searchGoogleMaps',
+  description:
+    'Search real-world places, businesses, addresses, ratings, opening details, and Google Maps links using Google Maps grounding.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      query: {
+        type: Type.STRING,
+        description:
+          'Natural-language place or location query (e.g., "best coffee shops near Austin TX", "hospitals near Dhaka").',
+      },
+      latitude: {
+        type: Type.NUMBER,
+        description: 'Optional latitude to bias location results.',
+      },
+      longitude: {
+        type: Type.NUMBER,
+        description: 'Optional longitude to bias location results.',
+      },
+    },
+    required: ['query'],
+  },
+};
+
+const readWebpageUrlDeclaration: FunctionDeclaration = {
+  name: 'readWebpageUrl',
+  description:
+    'Read and analyze the full contents of a specific webpage URL directly using Gemini URL Context grounding (great for docs, articles, changelogs, or pages that block simple scrapers).',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      url: {
+        type: Type.STRING,
+        description: 'Full http/https URL to read.',
+      },
+      question: {
+        type: Type.STRING,
+        description:
+          'Optional question or extraction goal for that webpage.',
+      },
+    },
+    required: ['url'],
+  },
+};
+
+const createScheduledTaskDeclaration: FunctionDeclaration = {
+  name: 'createScheduledTask',
+  description:
+    'Create a recurring automated schedule in Arix that runs on an interval while Arix is open: monitor a website URL ("site_check"), run an AI prompt ("command"), or send scheduled Telegram alerts ("telegram_message").',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      title: {
+        type: Type.STRING,
+        description: 'Short clear title for the schedule.',
+      },
+      actionType: {
+        type: Type.STRING,
+        description:
+          'One of: "site_check", "command", or "telegram_message".',
+      },
+      intervalMinutes: {
+        type: Type.NUMBER,
+        description: 'How often to run in minutes (1 to 10080).',
+      },
+      promptOrMessage: {
+        type: Type.STRING,
+        description:
+          'Prompt to run ("command"), message text ("telegram_message"), or optional check note ("site_check").',
+      },
+      targetUrl: {
+        type: Type.STRING,
+        description: 'Target http/https URL when actionType is "site_check".',
+      },
+      telegramConnectionId: {
+        type: Type.STRING,
+        description:
+          'Optional Telegram connection ID to forward results/alerts to.',
+      },
+    },
+    required: ['title', 'actionType', 'intervalMinutes', 'promptOrMessage'],
+  },
+};
+
+const listScheduledTasksDeclaration: FunctionDeclaration = {
+  name: 'listScheduledTasks',
+  description: 'List all configured recurring scheduled tasks inside Arix.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {},
+  },
+};
+
+const toggleScheduledTaskDeclaration: FunctionDeclaration = {
+  name: 'toggleScheduledTask',
+  description: 'Pause or resume a scheduled task by its ID or title.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      idOrTitle: { type: Type.STRING },
+      active: { type: Type.BOOLEAN },
+    },
+    required: ['idOrTitle', 'active'],
+  },
+};
+
+const deleteScheduledTaskDeclaration: FunctionDeclaration = {
+  name: 'deleteScheduledTask',
+  description: 'Delete a scheduled task by its ID or title.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      idOrTitle: { type: Type.STRING },
+    },
+    required: ['idOrTitle'],
+  },
+};
+
 const sseClients = new Set<express.Response>();
 const recentActivityEvents: ArixActivityEvent[] = [];
 
@@ -695,11 +823,147 @@ function emitArixActivity(
   return full;
 }
 
+const runningScheduleIds = new Set<string>();
+
+async function executeScheduledTask(task: ScheduledTask): Promise<ScheduledTask> {
+  const startedAt = Date.now();
+  const nextRunAt = new Date(
+    startedAt + Math.max(1, task.intervalMinutes) * 60_000
+  ).toISOString();
+
+  emitArixActivity({
+    phase: 'tool_start',
+    node: 'compute',
+    toolName: 'scheduledTask',
+    title: `Schedule · ${task.title}`,
+    detail: `Running ${task.actionType} (${task.intervalMinutes}m)...`,
+  });
+
+  try {
+    let resultText = '';
+    const state = getPublicState();
+    const tgConn = task.telegramConnectionId
+      ? state.connections.find(
+          (c) => c.id === task.telegramConnectionId && c.type === 'telegram'
+        )
+      : state.connections.find((c) => c.type === 'telegram' && c.active);
+
+    if (task.actionType === 'site_check') {
+      const checkUrl = (task.targetUrl || task.promptOrMessage || '').trim();
+      const scraped = await scrapeWebsite(checkUrl);
+      const status = scraped.signals.httpStatus ?? 0;
+      const loadMs = scraped.signals.loadTimeMs ?? 0;
+      const warn = scraped.signals.fetchWarning
+        ? ` · Warning: ${scraped.signals.fetchWarning}`
+        : '';
+      resultText = `HTTP ${status || 'N/A'} · ${loadMs}ms · Title: ${scraped.signals.title || 'Untitled'}${warn}`;
+
+      if (task.telegramConnectionId && tgConn) {
+        const token = getConnectionToken(tgConn.id);
+        if (token && tgConn.identifier) {
+          await sendTelegramMessage(
+            token,
+            tgConn.identifier,
+            `[Arix Schedule: ${task.title}]\n${checkUrl}\n${resultText}`
+          );
+        }
+      }
+    } else if (task.actionType === 'telegram_message') {
+      if (!tgConn) {
+        throw new Error('No active Telegram bot connected.');
+      }
+      const token = getConnectionToken(tgConn.id);
+      if (!token || !tgConn.identifier) {
+        throw new Error('Telegram bot token or chat ID missing.');
+      }
+      const sent = await sendTelegramMessage(
+        token,
+        tgConn.identifier,
+        task.promptOrMessage
+      );
+      if (!sent.ok) {
+        throw new Error(sent.error || 'Telegram send failed.');
+      }
+      resultText = `Sent Telegram message via ${tgConn.name}`;
+    } else {
+      const ai = getGeminiClient();
+      const activeRules = state.rules.filter((r) => r.active);
+      const res = await generateContentWithRetry(
+        ai,
+        {
+          model: ARIX_MODEL,
+          contents: task.promptOrMessage,
+          config: {
+            systemInstruction: buildArixSystemInstruction(
+              state.persona,
+              activeRules,
+              state.connections,
+              getActiveComputerRoot()
+            ),
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        },
+        { allowFallback: true }
+      );
+      resultText = (res.text || 'Completed scheduled command.').trim().slice(0, 900);
+
+      if (task.telegramConnectionId && tgConn) {
+        const token = getConnectionToken(tgConn.id);
+        if (token && tgConn.identifier) {
+          await sendTelegramMessage(
+            token,
+            tgConn.identifier,
+            `[Arix Schedule: ${task.title}]\n${resultText}`
+          );
+        }
+      }
+    }
+
+    const updated =
+      updateScheduledTask(task.id, {
+        lastRunAt: new Date().toISOString(),
+        nextRunAt,
+        lastStatus: 'ok',
+        lastResult: resultText,
+        runCount: task.runCount + 1,
+      }) || task;
+
+    emitArixActivity({
+      phase: 'done',
+      node: 'compute',
+      toolName: 'scheduledTask',
+      title: `Schedule · ${task.title} OK`,
+      detail: resultText.slice(0, 120),
+    });
+    return updated;
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : 'Scheduled task failed.';
+    const updated =
+      updateScheduledTask(task.id, {
+        lastRunAt: new Date().toISOString(),
+        nextRunAt,
+        lastStatus: 'error',
+        lastResult: errMsg,
+        runCount: task.runCount + 1,
+      }) || task;
+
+    emitArixActivity({
+      phase: 'error',
+      node: 'compute',
+      toolName: 'scheduledTask',
+      title: `Schedule · ${task.title} Error`,
+      detail: errMsg.slice(0, 120),
+    });
+    return updated;
+  }
+}
+
 function mapToolToNode(toolName: string): ArixSatelliteKey {
   switch (toolName) {
     case 'inspectGitHubRepo':
     case 'writeGitHubFile':
     case 'inspectConnectedSite':
+    case 'readWebpageUrl':
     case 'inspectArixSourceFile':
     case 'editArixSourceFile':
       return 'code';
@@ -711,6 +975,10 @@ function mapToolToNode(toolName: string): ArixSatelliteKey {
     case 'deleteLocalPath':
     case 'runComputerCommand':
     case 'inspectCloudflareDomain':
+    case 'createScheduledTask':
+    case 'listScheduledTasks':
+    case 'toggleScheduledTask':
+    case 'deleteScheduledTask':
       return 'compute';
     case 'saveTaughtRule':
     case 'createSelfSection':
@@ -719,6 +987,7 @@ function mapToolToNode(toolName: string): ArixSatelliteKey {
     case 'createPresentation':
       return 'text';
     case 'sendToTelegram':
+    case 'searchGoogleMaps':
       return 'network';
     default:
       return 'core';
@@ -833,6 +1102,36 @@ function formatToolStartDetail(
         title: 'Presentation · Building slides',
         detail: `Creating "${String(args.title || 'Presentation')}" (.pptx + viewer)...`,
       };
+    case 'searchGoogleMaps':
+      return {
+        title: 'Maps · Searching places',
+        detail: `Querying Google Maps for "${String(args.query || '')}"...`,
+      };
+    case 'readWebpageUrl':
+      return {
+        title: 'Web · Reading URL',
+        detail: `Reading ${String(args.url || 'webpage')} with URL Context...`,
+      };
+    case 'createScheduledTask':
+      return {
+        title: 'Schedules · Adding task',
+        detail: `Scheduling "${String(args.title || 'Recurring Task')}" every ${String(args.intervalMinutes || 60)}m...`,
+      };
+    case 'listScheduledTasks':
+      return {
+        title: 'Schedules · Listing tasks',
+        detail: 'Reading configured recurring schedules...',
+      };
+    case 'toggleScheduledTask':
+      return {
+        title: 'Schedules · Updating state',
+        detail: `${args.active ? 'Resuming' : 'Pausing'} "${String(args.idOrTitle || 'schedule')}"...`,
+      };
+    case 'deleteScheduledTask':
+      return {
+        title: 'Schedules · Removing task',
+        detail: `Deleting "${String(args.idOrTitle || 'schedule')}"...`,
+      };
     default:
       return {
         title: 'Arix · Running tool',
@@ -875,6 +1174,18 @@ function formatToolDoneTitle(toolName: string): string {
       return 'Code & Web · Scanned';
     case 'sendToTelegram':
       return 'Telegram · Delivered';
+    case 'searchGoogleMaps':
+      return 'Maps · Places found';
+    case 'readWebpageUrl':
+      return 'Web · Webpage read';
+    case 'createScheduledTask':
+      return 'Schedules · Scheduled';
+    case 'listScheduledTasks':
+      return 'Schedules · Listed';
+    case 'toggleScheduledTask':
+      return 'Schedules · Updated';
+    case 'deleteScheduledTask':
+      return 'Schedules · Deleted';
     default:
       return `Arix · ${toolName} done`;
   }
@@ -1956,6 +2267,9 @@ AVAILABLE LIVE TOOLS:
 - \`createSelfSection\`, \`updateSelfSection\`, \`deleteSelfSection\`: Add, update, or remove live interactive sections/tabs inside Arix itself! Whenever the owner teaches you coding or asks you to change yourself or create a section inside Arix, call \`createSelfSection\` with complete, dark-navy styled HTML/CSS/JS (#060E1F background, #0B152B cards, #38BDF8 accents, #f1f5f9 text) so the new section appears immediately in Arix's UI.
 - \`createPresentation\`: Build complete multi-slide PowerPoint (.pptx) presentations saved to \`presentations/<file>.pptx\` AND automatically launch an interactive slide deck viewer inside Arix (with keyboard arrow navigation, fullscreen mode, speaker notes, and Download .pptx). Follow any taught presentation rules strictly!
 - \`inspectArixSourceFile\`, \`editArixSourceFile\`: Read and modify Arix's own project source files (src/, server/, public/, electron/) with automatic backup.
+- \`searchGoogleMaps\`: Search real-world places, businesses, ratings, and Google Maps links whenever the owner asks about places near a location, routes/venues, or local businesses.
+- \`readWebpageUrl\`: Read a specific webpage URL directly using Gemini URL Context (documentation, articles, changelogs).
+- \`createScheduledTask\`, \`listScheduledTasks\`, \`toggleScheduledTask\`, \`deleteScheduledTask\`: Create, view, pause/resume, or delete recurring background automation schedules (website uptime checks, recurring AI prompts, or scheduled Telegram alerts).
 
 EXISTING SELF-BUILT SECTIONS INSIDE ARIX:
 ${
@@ -1991,6 +2305,12 @@ ${
         inspectGitHubRepoDeclaration,
         writeGitHubFileDeclaration,
         inspectCloudflareDomainDeclaration,
+        searchGoogleMapsDeclaration,
+        readWebpageUrlDeclaration,
+        createScheduledTaskDeclaration,
+        listScheduledTasksDeclaration,
+        toggleScheduledTaskDeclaration,
+        deleteScheduledTaskDeclaration,
       ];
 
       const tools = needsWebSearch
@@ -2671,6 +2991,198 @@ ${
                   response: cf,
                 },
               });
+            } else if (toolName === 'searchGoogleMaps') {
+              const query = String(args.query || '').trim();
+              const lat =
+                typeof args.latitude === 'number' ? args.latitude : undefined;
+              const lng =
+                typeof args.longitude === 'number' ? args.longitude : undefined;
+
+              const mapsRes = await generateContentWithRetry(
+                ai,
+                {
+                  model: ARIX_MODEL,
+                  contents: query,
+                  config: {
+                    tools: [{ googleMaps: {} }],
+                    ...(lat !== undefined && lng !== undefined
+                      ? {
+                          toolConfig: {
+                            retrievalConfig: {
+                              latLng: { latitude: lat, longitude: lng },
+                            },
+                          },
+                        }
+                      : {}),
+                  },
+                },
+                { allowFallback: true }
+              );
+
+              const chunks =
+                mapsRes.candidates?.[0]?.groundingMetadata?.groundingChunks;
+              const places: Array<{
+                title: string;
+                url: string;
+                reviews?: string[];
+              }> = [];
+              if (Array.isArray(chunks)) {
+                for (const c of chunks) {
+                  const m = (
+                    c as {
+                      maps?: {
+                        uri?: string;
+                        title?: string;
+                        placeAnswerSources?: {
+                          reviewSnippets?: Array<{ review?: string }>;
+                        };
+                      };
+                    }
+                  ).maps;
+                  if (m?.uri) {
+                    const placeTitle = m.title || m.uri;
+                    const reviews = Array.isArray(
+                      m.placeAnswerSources?.reviewSnippets
+                    )
+                      ? m.placeAnswerSources.reviewSnippets
+                          .map((r) => r.review)
+                          .filter((r): r is string => Boolean(r))
+                          .slice(0, 2)
+                      : undefined;
+                    places.push({
+                      title: placeTitle,
+                      url: m.uri,
+                      reviews,
+                    });
+                    if (!collectedSourcesMap.has(m.uri)) {
+                      collectedSourcesMap.set(m.uri, {
+                        title: placeTitle,
+                        url: m.uri,
+                      });
+                    }
+                  }
+                }
+              }
+
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: {
+                    ok: true,
+                    query,
+                    summary: (mapsRes.text || '').trim(),
+                    places,
+                  },
+                },
+              });
+            } else if (toolName === 'readWebpageUrl') {
+              const targetUrl = String(args.url || '').trim();
+              const question = String(
+                args.question ||
+                  'Read and summarize the key content, structure, and details of this webpage.'
+              ).trim();
+
+              const urlRes = await generateContentWithRetry(
+                ai,
+                {
+                  model: ARIX_MODEL,
+                  contents: `${question}\n\nURL: ${targetUrl}`,
+                  config: {
+                    tools: [{ urlContext: {} }],
+                  },
+                },
+                { allowFallback: true }
+              );
+
+              if (targetUrl && !collectedSourcesMap.has(targetUrl)) {
+                collectedSourcesMap.set(targetUrl, {
+                  title: targetUrl,
+                  url: targetUrl,
+                });
+              }
+
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: {
+                    ok: true,
+                    url: targetUrl,
+                    contentSummary: (urlRes.text || '').trim(),
+                  },
+                },
+              });
+            } else if (toolName === 'createScheduledTask') {
+              const rawAction = String(args.actionType || 'command');
+              const actionType: ScheduledTaskAction =
+                rawAction === 'site_check' || rawAction === 'telegram_message'
+                  ? rawAction
+                  : 'command';
+              const created = addScheduledTask({
+                title: String(args.title || 'Scheduled Task').trim(),
+                actionType,
+                intervalMinutes: Number(args.intervalMinutes) || 60,
+                promptOrMessage: String(args.promptOrMessage || '').trim(),
+                targetUrl: args.targetUrl
+                  ? String(args.targetUrl).trim()
+                  : undefined,
+                telegramConnectionId: args.telegramConnectionId
+                  ? String(args.telegramConnectionId).trim()
+                  : undefined,
+                active: true,
+              });
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: { ok: true, task: created },
+                },
+              });
+            } else if (toolName === 'listScheduledTasks') {
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: { ok: true, tasks: getScheduledTasks() },
+                },
+              });
+            } else if (toolName === 'toggleScheduledTask') {
+              const needle = String(args.idOrTitle || '').trim().toLowerCase();
+              const found = getScheduledTasks().find(
+                (t) =>
+                  t.id.toLowerCase() === needle ||
+                  t.title.toLowerCase().includes(needle)
+              );
+              const updated = found
+                ? updateScheduledTask(found.id, {
+                    active: Boolean(args.active),
+                  })
+                : null;
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: updated
+                    ? { ok: true, task: updated }
+                    : { ok: false, error: 'Scheduled task not found.' },
+                },
+              });
+            } else if (toolName === 'deleteScheduledTask') {
+              const needle = String(args.idOrTitle || '').trim().toLowerCase();
+              const found = getScheduledTasks().find(
+                (t) =>
+                  t.id.toLowerCase() === needle ||
+                  t.title.toLowerCase().includes(needle)
+              );
+              const removed = found ? deleteScheduledTask(found.id) : false;
+              responseParts.push({
+                functionResponse: {
+                  id: call.id,
+                  name: toolName,
+                  response: { ok: removed, idOrTitle: needle },
+                },
+              });
             } else {
               responseParts.push({
                 functionResponse: {
@@ -2827,6 +3339,7 @@ ${
         arixMessage: arixMsg,
         newlyLearnedRules,
         customSections: getCustomSections(),
+        scheduledTasks: getScheduledTasks(),
       });
     } catch (err) {
       const formatted = formatGeminiError(err);
@@ -3031,7 +3544,237 @@ ${
     }
   });
 
+  // Scheduled & Recurring Tasks REST API
+  app.get('/api/schedules', (_req, res) => {
+    res.json({ tasks: getScheduledTasks() });
+  });
+
+  app.post('/api/schedules', (req, res) => {
+    const {
+      title,
+      actionType,
+      intervalMinutes,
+      promptOrMessage,
+      targetUrl,
+      telegramConnectionId,
+    } = req.body ?? {};
+    if (!String(title || '').trim()) {
+      res.status(400).json({ error: 'Task title is required.' });
+      return;
+    }
+    const safeAction: ScheduledTaskAction =
+      actionType === 'site_check' || actionType === 'telegram_message'
+        ? actionType
+        : 'command';
+    const created = addScheduledTask({
+      title: String(title).trim(),
+      actionType: safeAction,
+      intervalMinutes: Number(intervalMinutes) || 15,
+      promptOrMessage: String(promptOrMessage || targetUrl || '').trim(),
+      targetUrl: targetUrl ? String(targetUrl).trim() : undefined,
+      telegramConnectionId: telegramConnectionId
+        ? String(telegramConnectionId).trim()
+        : undefined,
+      active: true,
+    });
+    res.status(201).json(created);
+  });
+
+  app.patch('/api/schedules/:id', (req, res) => {
+    const updated = updateScheduledTask(req.params.id, req.body ?? {});
+    if (!updated) {
+      res.status(404).json({ error: 'Scheduled task not found.' });
+      return;
+    }
+    res.json(updated);
+  });
+
+  app.delete('/api/schedules/:id', (req, res) => {
+    const ok = deleteScheduledTask(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: 'Scheduled task not found.' });
+      return;
+    }
+    res.json({ deleted: true });
+  });
+
+  app.post('/api/schedules/:id/run', async (req, res) => {
+    const task = getScheduledTasks().find((t) => t.id === req.params.id);
+    if (!task) {
+      res.status(404).json({ error: 'Scheduled task not found.' });
+      return;
+    }
+    if (runningScheduleIds.has(task.id)) {
+      res.status(409).json({ error: 'This task is already running.' });
+      return;
+    }
+    runningScheduleIds.add(task.id);
+    try {
+      const updated = await executeScheduledTask(task);
+      res.json(updated);
+    } finally {
+      runningScheduleIds.delete(task.id);
+    }
+  });
+
   const httpServer = http.createServer(app);
+
+  // Real-Time Gemini Live Voice Call WebSocket Bridge (/ws/live)
+  const liveWss = new WebSocketServer({ noServer: true });
+  httpServer.on('upgrade', (request, socket, head) => {
+    try {
+      const { pathname } = new URL(
+        request.url || '/',
+        `http://${request.headers.host || 'localhost'}`
+      );
+      if (pathname !== '/ws/live') return;
+      liveWss.handleUpgrade(request, socket, head, (ws) => {
+        liveWss.emit('connection', ws, request);
+      });
+    } catch {
+      // Ignore malformed upgrade URL
+    }
+  });
+
+  liveWss.on('connection', async (clientWs: WsSocket, request) => {
+    const urlObj = new URL(
+      request.url || '/ws/live',
+      `http://${request.headers.host || 'localhost'}`
+    );
+    const rawVoice = urlObj.searchParams.get('voice') || 'Kore';
+    const validVoices = new Set(['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr']);
+    const voiceName = validVoices.has(rawVoice) ? rawVoice : 'Kore';
+
+    let liveSession: Awaited<ReturnType<ReturnType<typeof getGeminiClient>['live']['connect']>> | null =
+      null;
+    let closed = false;
+
+    const sendToClient = (payload: Record<string, unknown>) => {
+      if (!closed && clientWs.readyState === clientWs.OPEN) {
+        clientWs.send(JSON.stringify(payload));
+      }
+    };
+
+    try {
+      const state = getPublicState();
+      const activeRules = state.rules.filter((r) => r.active);
+      const ai = getGeminiClient();
+
+      const liveSystemInstruction = `${buildArixSystemInstruction(
+        state.persona,
+        activeRules,
+        state.connections,
+        getActiveComputerRoot()
+      )}
+
+LIVE VOICE CALL STYLE:
+- You are in a real-time spoken voice call with the owner.
+- Respond concisely, naturally, and conversationally without markdown tables, raw URLs, or code blocks unless asked.`;
+
+      liveSession = await ai.live.connect({
+        model: 'gemini-3.8-live',
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName },
+            },
+          },
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          systemInstruction: liveSystemInstruction,
+        },
+        callbacks: {
+          onopen: () => {
+            emitArixActivity({
+              phase: 'tool_start',
+              node: 'core',
+              toolName: 'liveCall',
+              title: `Live Call · ${voiceName}`,
+              detail: 'Real-time voice conversation active',
+            });
+          },
+          onmessage: (msg: LiveServerMessage) => {
+            const sc = msg.serverContent;
+            if (!sc) return;
+            if (sc.interrupted) {
+              sendToClient({ interrupted: true });
+            }
+            if (sc.inputTranscription?.text) {
+              sendToClient({ inputTranscript: sc.inputTranscription.text });
+            }
+            if (sc.outputTranscription?.text) {
+              sendToClient({ outputTranscript: sc.outputTranscription.text });
+            }
+            const parts = sc.modelTurn?.parts || [];
+            for (const part of parts) {
+              if (part.inlineData?.data) {
+                sendToClient({ audio: part.inlineData.data });
+              }
+            }
+          },
+          onerror: (err: unknown) => {
+            const formatted = formatGeminiError(err);
+            sendToClient({ error: formatted.message });
+          },
+          onclose: () => {
+            if (!closed && clientWs.readyState === clientWs.OPEN) {
+              clientWs.close();
+            }
+          },
+        },
+      });
+    } catch (err) {
+      const formatted = formatGeminiError(err);
+      sendToClient({ error: formatted.message });
+      clientWs.close();
+      return;
+    }
+
+    clientWs.on('message', (rawData) => {
+      if (!liveSession || closed) return;
+      try {
+        const msg = JSON.parse(String(rawData)) as {
+          audio?: string;
+          text?: string;
+        };
+        if (msg.audio) {
+          liveSession.sendRealtimeInput({
+            audio: {
+              data: msg.audio,
+              mimeType: 'audio/pcm;rate=16000',
+            },
+          });
+        } else if (msg.text) {
+          liveSession.sendClientContent({
+            turns: [{ role: 'user', parts: [{ text: msg.text }] }],
+            turnComplete: true,
+          });
+        }
+      } catch {
+        // Ignore malformed client audio frame
+      }
+    });
+
+    clientWs.on('close', () => {
+      closed = true;
+      emitArixActivity({
+        phase: 'done',
+        node: 'core',
+        toolName: 'liveCall',
+        title: 'Live Call · Ended',
+        detail: 'Real-time voice session closed',
+      });
+      if (liveSession) {
+        try {
+          liveSession.close();
+        } catch {
+          // Ignore close failure
+        }
+        liveSession = null;
+      }
+    });
+  });
 
   if (process.env.NODE_ENV !== 'production') {
     if (process.env.DISABLE_HMR === 'true') {
@@ -3103,6 +3846,22 @@ export class ErrorOverlay extends HTMLElement {}
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Arix AI server running on http://0.0.0.0:${PORT}`);
+
+    // Background 30s scheduler loop for recurring tasks
+    setInterval(() => {
+      const nowMs = Date.now();
+      const tasks = getScheduledTasks();
+      for (const task of tasks) {
+        if (!task.active || runningScheduleIds.has(task.id)) continue;
+        const dueMs = Date.parse(task.nextRunAt);
+        if (!Number.isNaN(dueMs) && nowMs >= dueMs) {
+          runningScheduleIds.add(task.id);
+          void executeScheduledTask(task).finally(() => {
+            runningScheduleIds.delete(task.id);
+          });
+        }
+      }
+    }, 30_000);
   });
 }
 

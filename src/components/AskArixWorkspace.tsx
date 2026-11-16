@@ -22,6 +22,8 @@ import {
   Mic,
   MicOff,
   Paperclip,
+  Phone,
+  PhoneOff,
   Play,
   Send,
   Sparkles,
@@ -36,6 +38,14 @@ import {
 import { ArixAvatar } from './ArixAvatar';
 import { CodeBlock } from './CodeBlock';
 import { filesToChatAttachments } from '../utils/imageAttachment';
+import {
+  getLiveCallState,
+  startLiveCall,
+  stopLiveCall,
+  subscribeLiveCall,
+  toggleLiveCallMute,
+  type LiveCallState,
+} from '../utils/liveCallClient';
 import {
   ARIX_VOICES,
   getVoicePlaybackState,
@@ -160,6 +170,9 @@ export function AskArixWorkspace({
   const [voiceState, setVoiceState] = useState<VoicePlaybackState>(() =>
     getVoicePlaybackState()
   );
+  const [liveCall, setLiveCall] = useState<LiveCallState>(() =>
+    getLiveCallState()
+  );
   const [expandedThoughts, setExpandedThoughts] = useState<
     Record<string, boolean>
   >({});
@@ -281,6 +294,10 @@ export function AskArixWorkspace({
 
   useEffect(() => {
     return subscribeVoicePlayback(setVoiceState);
+  }, []);
+
+  useEffect(() => {
+    return subscribeLiveCall(setLiveCall);
   }, []);
 
   useEffect(() => {
@@ -500,6 +517,35 @@ export function AskArixWorkspace({
               <span>{autoSpeak ? 'Auto' : 'Manual'}</span>
             </button>
           </div>
+          <button
+            type="button"
+            onClick={() =>
+              liveCall.status === 'live' || liveCall.status === 'connecting'
+                ? stopLiveCall()
+                : void startLiveCall(voiceName)
+            }
+            title="Start or end a real-time two-way voice call with Arix"
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              liveCall.status === 'live' || liveCall.status === 'connecting'
+                ? 'bg-red-500/20 border-red-500/60 text-red-200 hover:bg-red-500/30'
+                : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25'
+            }`}
+          >
+            {liveCall.status === 'connecting' ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : liveCall.status === 'live' ? (
+              <PhoneOff className="w-3.5 h-3.5" />
+            ) : (
+              <Phone className="w-3.5 h-3.5" />
+            )}
+            <span>
+              {liveCall.status === 'connecting'
+                ? 'Connecting...'
+                : liveCall.status === 'live'
+                  ? 'End Call'
+                  : 'Live Call'}
+            </span>
+          </button>
           {connections.length > 0 && (
             <select
               aria-label="Attach connected platform"
@@ -582,6 +628,81 @@ export function AskArixWorkspace({
       {voiceState.error && (
         <div className="px-6 py-2 bg-red-950/40 border-b border-red-500/30 text-xs text-red-300 flex items-center justify-between gap-2">
           <span>Voice playback: {voiceState.error}</span>
+        </div>
+      )}
+
+      {liveCall.status !== 'idle' && (
+        <div
+          className={`px-6 py-3 border-b text-xs flex flex-wrap items-center justify-between gap-3 ${
+            liveCall.status === 'error'
+              ? 'bg-red-950/40 border-red-500/30 text-red-200'
+              : 'bg-[#07162B] border-emerald-500/30 text-slate-200'
+          }`}
+        >
+          <div className="space-y-1 min-w-0 flex-1">
+            <div className="flex items-center gap-2 font-medium">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  liveCall.status === 'live'
+                    ? 'bg-emerald-400 animate-pulse'
+                    : liveCall.status === 'error'
+                      ? 'bg-red-400'
+                      : 'bg-sky-400 animate-pulse'
+                }`}
+              />
+              <span>
+                {liveCall.status === 'connecting'
+                  ? `Connecting live voice call (${voiceName})...`
+                  : liveCall.status === 'error'
+                    ? `Live Call Error: ${liveCall.error}`
+                    : `Live Voice Call Active · ${voiceName} (speak anytime, interrupt naturally)`}
+              </span>
+            </div>
+            {(liveCall.userTranscript || liveCall.arixTranscript) && (
+              <div className="text-[11px] text-slate-300 space-y-0.5 truncate">
+                {liveCall.userTranscript && (
+                  <div className="truncate">
+                    <span className="text-sky-300 font-semibold">You:</span>{' '}
+                    {liveCall.userTranscript}
+                  </div>
+                )}
+                {liveCall.arixTranscript && (
+                  <div className="truncate">
+                    <span className="text-emerald-300 font-semibold">Arix:</span>{' '}
+                    {liveCall.arixTranscript.slice(-180)}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {liveCall.status === 'live' && (
+              <button
+                type="button"
+                onClick={toggleLiveCallMute}
+                className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer ${
+                  liveCall.muted
+                    ? 'bg-amber-500/20 border-amber-500/50 text-amber-200'
+                    : 'bg-[#060E1F] border-slate-700 text-slate-200 hover:border-slate-500'
+                }`}
+              >
+                {liveCall.muted ? (
+                  <MicOff className="w-3.5 h-3.5" />
+                ) : (
+                  <Mic className="w-3.5 h-3.5" />
+                )}
+                <span>{liveCall.muted ? 'Muted' : 'Mute'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={stopLiveCall}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-500/20 border border-red-500/50 text-red-200 hover:bg-red-500/30 text-xs font-medium cursor-pointer"
+            >
+              <PhoneOff className="w-3.5 h-3.5" />
+              <span>{liveCall.status === 'error' ? 'Close' : 'End Call'}</span>
+            </button>
+          </div>
         </div>
       )}
 

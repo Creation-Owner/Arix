@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
+  CalendarClock,
   Clock,
   FolderOpen,
   Home,
@@ -24,6 +25,7 @@ import {
   OfflineIndicator,
   PWAInstallButton,
 } from './components/PWAInstallButton';
+import { SchedulesWorkspace } from './components/SchedulesWorkspace';
 import { SelfSectionFrame } from './components/SelfSectionFrame';
 import { TeachArixWorkspace } from './components/TeachArixWorkspace';
 import type {
@@ -41,6 +43,8 @@ import type {
   ReasoningMode,
   RuleCategory,
   RuleWeight,
+  ScheduledTask,
+  ScheduledTaskAction,
   TaughtRule,
   WebsiteAudit,
 } from './types/arix';
@@ -53,6 +57,7 @@ type BuiltInTab =
   | 'analyze'
   | 'ask'
   | 'teach'
+  | 'schedules'
   | 'history';
 
 type WorkspaceTab = BuiltInTab | `section:${string}`;
@@ -64,6 +69,7 @@ const TAB_META: Record<BuiltInTab, { label: string }> = {
   analyze: { label: 'Analyze Website' },
   ask: { label: 'Command Chat' },
   teach: { label: 'Teach Arix' },
+  schedules: { label: 'Schedules' },
   history: { label: 'Audit History' },
 };
 
@@ -90,6 +96,7 @@ export default function App() {
   const [audits, setAudits] = useState<WebsiteAudit[]>([]);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [customSections, setCustomSections] = useState<CustomSection[]>([]);
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
 
   const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
   const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
@@ -133,6 +140,7 @@ export default function App() {
         setAudits(data.audits);
         setChatHistory(data.chatHistory);
         setCustomSections(data.customSections || []);
+        setScheduledTasks(data.scheduledTasks || []);
         setComputerRoot(data.computerRoot || '');
         if (data.audits.length > 0) {
           setSelectedAuditId(data.audits[0].id);
@@ -603,6 +611,9 @@ export default function App() {
       if (Array.isArray(data.customSections)) {
         setCustomSections(data.customSections as CustomSection[]);
       }
+      if (Array.isArray(data.scheduledTasks)) {
+        setScheduledTasks(data.scheduledTasks as ScheduledTask[]);
+      }
     } catch (err) {
       const isAbort = err instanceof DOMException && err.name === 'AbortError';
       const msg = isAbort
@@ -631,6 +642,53 @@ export default function App() {
     setChatHistory([]);
   };
 
+  const handleCreateSchedule = async (payload: {
+    title: string;
+    actionType: ScheduledTaskAction;
+    intervalMinutes: number;
+    promptOrMessage: string;
+    targetUrl?: string;
+    telegramConnectionId?: string;
+  }) => {
+    const res = await fetch('/api/schedules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to create schedule.');
+    setScheduledTasks((prev) => [data as ScheduledTask, ...prev]);
+  };
+
+  const handleToggleSchedule = async (id: string, active: boolean) => {
+    const res = await fetch(`/api/schedules/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active }),
+    });
+    if (!res.ok) return;
+    const updated = (await res.json()) as ScheduledTask;
+    setScheduledTasks((prev) =>
+      prev.map((t) => (t.id === id ? updated : t))
+    );
+  };
+
+  const handleRunScheduleNow = async (id: string) => {
+    const res = await fetch(`/api/schedules/${id}/run`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to run schedule.');
+    const updated = data as ScheduledTask;
+    setScheduledTasks((prev) =>
+      prev.map((t) => (t.id === id ? updated : t))
+    );
+  };
+
+  const handleDeleteSchedule = async (id: string) => {
+    const res = await fetch(`/api/schedules/${id}`, { method: 'DELETE' });
+    if (!res.ok) return;
+    setScheduledTasks((prev) => prev.filter((t) => t.id !== id));
+  };
+
   const navItems: Array<{
     id: BuiltInTab;
     label: string;
@@ -652,6 +710,12 @@ export default function App() {
       label: 'Teach Arix',
       icon: BookOpen,
       count: activeRules.length,
+    },
+    {
+      id: 'schedules',
+      label: 'Schedules',
+      icon: CalendarClock,
+      count: scheduledTasks.filter((t) => t.active).length,
     },
     {
       id: 'history',
@@ -1042,6 +1106,17 @@ export default function App() {
                   onSavePersona={handleSavePersona}
                   onExportBrain={handleExportBrain}
                   onImportBrain={handleImportBrain}
+                />
+              )}
+
+              {activeTab === 'schedules' && (
+                <SchedulesWorkspace
+                  tasks={scheduledTasks}
+                  connections={connections}
+                  onCreateTask={handleCreateSchedule}
+                  onToggleTask={handleToggleSchedule}
+                  onRunTaskNow={handleRunScheduleNow}
+                  onDeleteTask={handleDeleteSchedule}
                 />
               )}
 

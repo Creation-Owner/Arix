@@ -8,6 +8,7 @@ import type {
   CustomSection,
   PersonaSettings,
   RuleCategory,
+  ScheduledTask,
   TaughtRule,
   WebsiteAudit,
 } from '../src/types/arix.ts';
@@ -26,6 +27,7 @@ interface PersistedArixStore {
   audits: WebsiteAudit[];
   chatHistory: ChatMessage[];
   customSections: CustomSection[];
+  scheduledTasks: ScheduledTask[];
   computerRootOverride?: string;
 }
 
@@ -109,6 +111,7 @@ function createInitialStore(): PersistedArixStore {
         audits: Array.isArray(legacy.audits) ? legacy.audits : [],
         chatHistory: migratedChat,
         customSections: [],
+        scheduledTasks: [],
       };
     } catch {
       // Fallback to fresh store
@@ -122,6 +125,7 @@ function createInitialStore(): PersistedArixStore {
     audits: [],
     chatHistory: [],
     customSections: [],
+    scheduledTasks: [],
   };
 }
 
@@ -146,6 +150,9 @@ function ensureStore(): PersistedArixStore {
       chatHistory: Array.isArray(parsed.chatHistory) ? parsed.chatHistory : [],
       customSections: Array.isArray(parsed.customSections)
         ? parsed.customSections
+        : [],
+      scheduledTasks: Array.isArray(parsed.scheduledTasks)
+        ? parsed.scheduledTasks
         : [],
       computerRootOverride: parsed.computerRootOverride,
     };
@@ -193,6 +200,7 @@ export function getPublicState(): ArixStatePayload {
     audits: store.audits,
     chatHistory: store.chatHistory,
     customSections: store.customSections,
+    scheduledTasks: store.scheduledTasks,
     computerRoot: resolveComputerRoot(store.computerRootOverride),
   };
 }
@@ -498,4 +506,48 @@ export function importPortableBrain(payload: {
 
   writeStore(store);
   return { importedRules, importedSections };
+}
+
+export function getScheduledTasks(): ScheduledTask[] {
+  return ensureStore().scheduledTasks;
+}
+
+export function addScheduledTask(
+  input: Omit<ScheduledTask, 'id' | 'createdAt' | 'nextRunAt' | 'runCount'>
+): ScheduledTask {
+  const store = ensureStore();
+  const now = Date.now();
+  const safeInterval = Math.max(1, Math.min(10080, Number(input.intervalMinutes) || 60));
+  const task: ScheduledTask = {
+    ...input,
+    intervalMinutes: safeInterval,
+    id: `sched-${now}-${Math.random().toString(36).slice(2, 6)}`,
+    createdAt: new Date(now).toISOString(),
+    nextRunAt: new Date(now + safeInterval * 60_000).toISOString(),
+    runCount: 0,
+  };
+  store.scheduledTasks = [task, ...store.scheduledTasks];
+  writeStore(store);
+  return task;
+}
+
+export function updateScheduledTask(
+  id: string,
+  patch: Partial<Omit<ScheduledTask, 'id' | 'createdAt'>>
+): ScheduledTask | null {
+  const store = ensureStore();
+  const idx = store.scheduledTasks.findIndex((t) => t.id === id);
+  if (idx === -1) return null;
+  store.scheduledTasks[idx] = { ...store.scheduledTasks[idx], ...patch };
+  writeStore(store);
+  return store.scheduledTasks[idx];
+}
+
+export function deleteScheduledTask(id: string): boolean {
+  const store = ensureStore();
+  const before = store.scheduledTasks.length;
+  store.scheduledTasks = store.scheduledTasks.filter((t) => t.id !== id);
+  if (store.scheduledTasks.length === before) return false;
+  writeStore(store);
+  return true;
 }

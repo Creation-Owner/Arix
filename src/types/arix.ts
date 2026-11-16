@@ -177,6 +177,25 @@ export interface CustomSection {
   updatedAt: string;
 }
 
+export type ScheduledTaskAction = 'command' | 'site_check' | 'telegram_message';
+
+export interface ScheduledTask {
+  id: string;
+  title: string;
+  actionType: ScheduledTaskAction;
+  intervalMinutes: number;
+  promptOrMessage: string;
+  targetUrl?: string;
+  telegramConnectionId?: string;
+  active: boolean;
+  createdAt: string;
+  nextRunAt: string;
+  lastRunAt?: string;
+  lastStatus?: 'ok' | 'error';
+  lastResult?: string;
+  runCount: number;
+}
+
 export interface ArixStatePayload {
   rules: TaughtRule[];
   persona: PersonaSettings;
@@ -184,6 +203,7 @@ export interface ArixStatePayload {
   audits: WebsiteAudit[];
   chatHistory: ChatMessage[];
   customSections: CustomSection[];
+  scheduledTasks: ScheduledTask[];
   computerRoot: string;
 }
 
