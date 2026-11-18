@@ -196,6 +196,20 @@ export interface ScheduledTask {
   runCount: number;
 }
 
+export interface WebsiteWidgetSettings {
+  enabled: boolean;
+  assistantName: string;
+  tagline: string;
+  welcomeMessage: string;
+  placeholder: string;
+  accentColor: string;
+  position: 'bottom-right' | 'bottom-left';
+  allowedOrigins: string;
+  siteKnowledge: string;
+  publicKey: string;
+  requirePublicKey: boolean;
+}
+
 export interface ArixStatePayload {
   rules: TaughtRule[];
   persona: PersonaSettings;
@@ -204,6 +218,7 @@ export interface ArixStatePayload {
   chatHistory: ChatMessage[];
   customSections: CustomSection[];
   scheduledTasks: ScheduledTask[];
+  widgetSettings: WebsiteWidgetSettings;
   computerRoot: string;
 }
 

@@ -56,7 +56,9 @@ import {
   getCustomSections,
   getPublicState,
   getScheduledTasks,
+  getWidgetSettings,
   importPortableBrain,
+  regenerateWidgetKey,
   resetRulesToZero,
   saveAudit,
   setComputerRootOverride,
@@ -66,7 +68,9 @@ import {
   updatePersona,
   updateRule,
   updateScheduledTask,
+  updateWidgetSettings,
 } from './server/store.ts';
+import { buildArixWidgetScript } from './server/widgetScript.ts';
 import {
   editArixSourceFile,
   inspectArixSourceFile,
@@ -3614,6 +3618,231 @@ ${
       res.json(updated);
     } finally {
       runningScheduleIds.delete(task.id);
+    }
+  });
+
+  // Website Assistant Widget Settings & Public Visitor Endpoints
+  function applyAssistantCors(
+    req: express.Request,
+    res: express.Response,
+    allowedOrigins: string
+  ): boolean {
+    const reqOrigin = String(req.headers.origin || '').trim();
+    const cleanAllowed = (allowedOrigins || '*').trim();
+    if (!cleanAllowed || cleanAllowed === '*') {
+      res.setHeader('Access-Control-Allow-Origin', reqOrigin || '*');
+      res.setHeader('Vary', 'Origin');
+    } else {
+      const list = cleanAllowed
+        .split(',')
+        .map((s) => s.trim().replace(/\/+$/, '').toLowerCase())
+        .filter(Boolean);
+      const normalizedOrigin = reqOrigin.replace(/\/+$/, '').toLowerCase();
+      if (reqOrigin && !list.includes(normalizedOrigin)) {
+        return false;
+      }
+      if (reqOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+        res.setHeader('Vary', 'Origin');
+      }
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, X-Arix-Widget-Key'
+    );
+    return true;
+  }
+
+  app.put('/api/widget', (req, res) => {
+    const body = req.body ?? {};
+    const patch: Record<string, unknown> = {};
+    if (typeof body.enabled === 'boolean') patch.enabled = body.enabled;
+    if (typeof body.assistantName === 'string')
+      patch.assistantName = body.assistantName.trim().slice(0, 60) || 'Arix Assistant';
+    if (typeof body.tagline === 'string')
+      patch.tagline = body.tagline.trim().slice(0, 100);
+    if (typeof body.welcomeMessage === 'string')
+      patch.welcomeMessage = body.welcomeMessage.trim().slice(0, 400);
+    if (typeof body.placeholder === 'string')
+      patch.placeholder = body.placeholder.trim().slice(0, 100);
+    if (typeof body.accentColor === 'string')
+      patch.accentColor = body.accentColor.trim().slice(0, 20);
+    if (body.position === 'bottom-left' || body.position === 'bottom-right')
+      patch.position = body.position;
+    if (typeof body.allowedOrigins === 'string')
+      patch.allowedOrigins = body.allowedOrigins.trim();
+    if (typeof body.siteKnowledge === 'string')
+      patch.siteKnowledge = body.siteKnowledge.slice(0, 12000);
+    if (typeof body.requirePublicKey === 'boolean')
+      patch.requirePublicKey = body.requirePublicKey;
+
+    res.json(updateWidgetSettings(patch));
+  });
+
+  app.post('/api/widget/regenerate-key', (_req, res) => {
+    res.json(regenerateWidgetKey());
+  });
+
+  app.get('/arix-widget.js', (_req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('application/javascript; charset=utf-8');
+    res.send(buildArixWidgetScript());
+  });
+
+  app.options('/api/assistant/*', (req, res) => {
+    const cfg = getWidgetSettings();
+    const okOrigin = applyAssistantCors(req, res, cfg.allowedOrigins);
+    if (!okOrigin) {
+      res.status(403).end();
+      return;
+    }
+    res.status(204).end();
+  });
+
+  app.get('/api/assistant/config', (req, res) => {
+    const cfg = getWidgetSettings();
+    const okOrigin = applyAssistantCors(req, res, cfg.allowedOrigins);
+    if (!okOrigin) {
+      res.status(403).json({ error: 'Origin not allowed by widget settings.' });
+      return;
+    }
+    res.json({
+      enabled: cfg.enabled,
+      assistantName: cfg.assistantName,
+      tagline: cfg.tagline,
+      welcomeMessage: cfg.welcomeMessage,
+      placeholder: cfg.placeholder,
+      accentColor: cfg.accentColor,
+      position: cfg.position,
+    });
+  });
+
+  app.post('/api/assistant/chat', async (req, res) => {
+    const cfg = getWidgetSettings();
+    const okOrigin = applyAssistantCors(req, res, cfg.allowedOrigins);
+    if (!okOrigin) {
+      res.status(403).json({ error: 'Origin not allowed by widget settings.' });
+      return;
+    }
+    if (!cfg.enabled) {
+      res.status(403).json({ error: 'Website assistant widget is currently paused.' });
+      return;
+    }
+
+    const suppliedKey = String(
+      req.headers['x-arix-widget-key'] || req.body?.widgetKey || ''
+    ).trim();
+    if (cfg.requirePublicKey && suppliedKey !== cfg.publicKey) {
+      res.status(401).json({ error: 'Invalid or missing widget key.' });
+      return;
+    }
+
+    const rawMessage = String(req.body?.message || '').trim();
+    if (!rawMessage) {
+      res.status(400).json({ error: 'Message is required.' });
+      return;
+    }
+    if (rawMessage.length > 2000) {
+      res.status(400).json({ error: 'Message is too long (max 2000 characters).' });
+      return;
+    }
+
+    try {
+      const state = getPublicState();
+      const activeSites = state.connections
+        .filter((c) => c.type === 'website' && c.active)
+        .map(
+          (c) =>
+            `- ${c.name} (${c.targetUrl})${c.metadataSummary ? `: ${c.metadataSummary}` : ''}`
+        )
+        .join('\n');
+
+      const pageUrl = req.body?.pageUrl ? String(req.body.pageUrl).slice(0, 300) : '';
+      const pageTitle = req.body?.pageTitle ? String(req.body.pageTitle).slice(0, 200) : '';
+
+      const visitorSystemInstruction = `You are "${cfg.assistantName}", the helpful public website AI assistant embedded on the owner's website.
+
+YOUR MISSION & BOUNDARIES:
+- Answer questions from website visitors clearly, accurately, concisely, and politely.
+- Rely strictly on the Website Knowledge and connected site summaries below. If something is not covered and you cannot verify it, say clearly that you don't have that exact detail and suggest contacting the site owner.
+- NEVER claim access to the owner's private computer, local files, GitHub tokens, Telegram bots, or server internals. You are strictly a public visitor-facing assistant.
+
+CONNECTED WEBSITES:
+${activeSites || 'Not specified.'}
+
+OWNER'S WEBSITE KNOWLEDGE & SUPPORT RULES:
+${cfg.siteKnowledge.trim() || 'No custom business knowledge added yet. Be helpful, polite, and concise.'}
+
+VISITOR CURRENT PAGE:
+${pageTitle ? `Title: ${pageTitle}` : ''} ${pageUrl ? `URL: ${pageUrl}` : ''}`;
+
+      const rawHistory = Array.isArray(req.body?.history) ? req.body.history : [];
+      const historyTurns = rawHistory
+        .slice(-10)
+        .filter(
+          (item: unknown): item is { role: string; content: string } =>
+            Boolean(item) &&
+            typeof item === 'object' &&
+            typeof (item as { content?: unknown }).content === 'string'
+        )
+        .map((item: { role: string; content: string }) => ({
+          role: item.role === 'user' ? ('user' as const) : ('model' as const),
+          parts: [{ text: item.content.slice(0, 1200) }],
+        }));
+
+      const ai = getGeminiClient();
+      emitArixActivity({
+        phase: 'tool_start',
+        node: 'network',
+        toolName: 'websiteAssistant',
+        title: `Website Widget · Visitor Question`,
+        detail: rawMessage.slice(0, 90),
+      });
+
+      const response = await generateContentWithRetry(
+        ai,
+        {
+          model: ARIX_MODEL,
+          contents: [
+            ...historyTurns,
+            { role: 'user', parts: [{ text: rawMessage }] },
+          ],
+          config: {
+            systemInstruction: visitorSystemInstruction,
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        },
+        { allowFallback: true }
+      );
+
+      const reply =
+        (response.text || '').trim() ||
+        'Thanks for reaching out! How else can I assist you on this website?';
+
+      emitArixActivity({
+        phase: 'done',
+        node: 'network',
+        toolName: 'websiteAssistant',
+        title: `Website Widget · Replied`,
+        detail: reply.slice(0, 90),
+      });
+
+      res.json({
+        reply,
+        assistantName: cfg.assistantName,
+      });
+    } catch (err) {
+      const formatted = formatGeminiError(err);
+      emitArixActivity({
+        phase: 'error',
+        node: 'network',
+        toolName: 'websiteAssistant',
+        title: 'Website Widget · Error',
+        detail: formatted.message,
+      });
+      res.status(formatted.status).json({ error: formatted.message });
     }
   });
 

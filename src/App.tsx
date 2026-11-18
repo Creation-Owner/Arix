@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
+  Bot,
   CalendarClock,
   Clock,
   FolderOpen,
@@ -28,6 +29,7 @@ import {
 import { SchedulesWorkspace } from './components/SchedulesWorkspace';
 import { SelfSectionFrame } from './components/SelfSectionFrame';
 import { TeachArixWorkspace } from './components/TeachArixWorkspace';
+import { WidgetWorkspace } from './components/WidgetWorkspace';
 import type {
   ArixActivityEvent,
   ArixLiveStatus,
@@ -47,12 +49,14 @@ import type {
   ScheduledTaskAction,
   TaughtRule,
   WebsiteAudit,
+  WebsiteWidgetSettings,
 } from './types/arix';
 import { playArixSpeech } from './utils/voicePlayer';
 
 type BuiltInTab =
   | 'home'
   | 'connections'
+  | 'widget'
   | 'computer'
   | 'analyze'
   | 'ask'
@@ -65,6 +69,7 @@ type WorkspaceTab = BuiltInTab | `section:${string}`;
 const TAB_META: Record<BuiltInTab, { label: string }> = {
   home: { label: 'Main Page' },
   connections: { label: 'Connect Sites' },
+  widget: { label: 'Website Widget' },
   computer: { label: 'Computer Files' },
   analyze: { label: 'Analyze Website' },
   ask: { label: 'Command Chat' },
@@ -97,6 +102,19 @@ export default function App() {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [customSections, setCustomSections] = useState<CustomSection[]>([]);
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
+  const [widgetSettings, setWidgetSettings] = useState<WebsiteWidgetSettings>({
+    enabled: true,
+    assistantName: 'Arix Assistant',
+    tagline: 'AI Website Assistant',
+    welcomeMessage: 'Hi! Ask me anything about our website, products, or support.',
+    placeholder: 'Ask a question...',
+    accentColor: '#38BDF8',
+    position: 'bottom-right',
+    allowedOrigins: '*',
+    siteKnowledge: '',
+    publicKey: '',
+    requirePublicKey: false,
+  });
 
   const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
   const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
@@ -141,6 +159,7 @@ export default function App() {
         setChatHistory(data.chatHistory);
         setCustomSections(data.customSections || []);
         setScheduledTasks(data.scheduledTasks || []);
+        if (data.widgetSettings) setWidgetSettings(data.widgetSettings);
         setComputerRoot(data.computerRoot || '');
         if (data.audits.length > 0) {
           setSelectedAuditId(data.audits[0].id);
@@ -689,6 +708,26 @@ export default function App() {
     setScheduledTasks((prev) => prev.filter((t) => t.id !== id));
   };
 
+  const handleSaveWidgetSettings = async (
+    patch: Partial<WebsiteWidgetSettings>
+  ) => {
+    const res = await fetch('/api/widget', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save widget settings.');
+    setWidgetSettings(data as WebsiteWidgetSettings);
+  };
+
+  const handleRegenerateWidgetKey = async () => {
+    const res = await fetch('/api/widget/regenerate-key', { method: 'POST' });
+    if (!res.ok) return;
+    const data = (await res.json()) as WebsiteWidgetSettings;
+    setWidgetSettings(data);
+  };
+
   const navItems: Array<{
     id: BuiltInTab;
     label: string;
@@ -702,6 +741,7 @@ export default function App() {
       icon: Link2,
       count: connections.length,
     },
+    { id: 'widget', label: 'Website Widget', icon: Bot },
     { id: 'computer', label: 'Computer Files', icon: FolderOpen },
     { id: 'analyze', label: 'Analyze Website', icon: SearchCode },
     { id: 'ask', label: 'Command Chat', icon: MessageSquare },
@@ -1036,6 +1076,15 @@ export default function App() {
                     setSelectedConnectionId(conn.id);
                     switchTab('ask');
                   }}
+                />
+              )}
+
+              {activeTab === 'widget' && (
+                <WidgetWorkspace
+                  settings={widgetSettings}
+                  connections={connections}
+                  onSaveSettings={handleSaveWidgetSettings}
+                  onRegenerateKey={handleRegenerateWidgetKey}
                 />
               )}
 

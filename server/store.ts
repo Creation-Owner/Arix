@@ -11,6 +11,7 @@ import type {
   ScheduledTask,
   TaughtRule,
   WebsiteAudit,
+  WebsiteWidgetSettings,
 } from '../src/types/arix.ts';
 
 const DATA_DIR = process.env.ARIX_DATA_DIR
@@ -28,7 +29,28 @@ interface PersistedArixStore {
   chatHistory: ChatMessage[];
   customSections: CustomSection[];
   scheduledTasks: ScheduledTask[];
+  widgetSettings: WebsiteWidgetSettings;
   computerRootOverride?: string;
+}
+
+function generatePublicWidgetKey(): string {
+  return `arix-pub-${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function createDefaultWidgetSettings(): WebsiteWidgetSettings {
+  return {
+    enabled: true,
+    assistantName: 'Arix Assistant',
+    tagline: 'AI Website Assistant',
+    welcomeMessage: 'Hi! Ask me anything about our website, products, or support.',
+    placeholder: 'Ask a question...',
+    accentColor: '#38BDF8',
+    position: 'bottom-right',
+    allowedOrigins: '*',
+    siteKnowledge: '',
+    publicKey: generatePublicWidgetKey(),
+    requirePublicKey: false,
+  };
 }
 
 const DEFAULT_PERSONA: PersonaSettings = {
@@ -112,6 +134,7 @@ function createInitialStore(): PersistedArixStore {
         chatHistory: migratedChat,
         customSections: [],
         scheduledTasks: [],
+        widgetSettings: createDefaultWidgetSettings(),
       };
     } catch {
       // Fallback to fresh store
@@ -126,6 +149,7 @@ function createInitialStore(): PersistedArixStore {
     chatHistory: [],
     customSections: [],
     scheduledTasks: [],
+    widgetSettings: createDefaultWidgetSettings(),
   };
 }
 
@@ -141,6 +165,7 @@ function ensureStore(): PersistedArixStore {
   try {
     const raw = fs.readFileSync(STORE_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<PersistedArixStore>;
+    const defaults = createDefaultWidgetSettings();
     return {
       rules: Array.isArray(parsed.rules) ? parsed.rules : DEFAULT_RULES,
       persona: { ...DEFAULT_PERSONA, ...(parsed.persona || {}) },
@@ -154,6 +179,11 @@ function ensureStore(): PersistedArixStore {
       scheduledTasks: Array.isArray(parsed.scheduledTasks)
         ? parsed.scheduledTasks
         : [],
+      widgetSettings: {
+        ...defaults,
+        ...(parsed.widgetSettings || {}),
+        publicKey: parsed.widgetSettings?.publicKey || defaults.publicKey,
+      },
       computerRootOverride: parsed.computerRootOverride,
     };
   } catch {
@@ -201,6 +231,7 @@ export function getPublicState(): ArixStatePayload {
     chatHistory: store.chatHistory,
     customSections: store.customSections,
     scheduledTasks: store.scheduledTasks,
+    widgetSettings: store.widgetSettings,
     computerRoot: resolveComputerRoot(store.computerRootOverride),
   };
 }
@@ -550,4 +581,31 @@ export function deleteScheduledTask(id: string): boolean {
   if (store.scheduledTasks.length === before) return false;
   writeStore(store);
   return true;
+}
+
+export function getWidgetSettings(): WebsiteWidgetSettings {
+  return ensureStore().widgetSettings;
+}
+
+export function updateWidgetSettings(
+  patch: Partial<WebsiteWidgetSettings>
+): WebsiteWidgetSettings {
+  const store = ensureStore();
+  store.widgetSettings = {
+    ...store.widgetSettings,
+    ...patch,
+    publicKey: store.widgetSettings.publicKey || generatePublicWidgetKey(),
+  };
+  writeStore(store);
+  return store.widgetSettings;
+}
+
+export function regenerateWidgetKey(): WebsiteWidgetSettings {
+  const store = ensureStore();
+  store.widgetSettings = {
+    ...store.widgetSettings,
+    publicKey: generatePublicWidgetKey(),
+  };
+  writeStore(store);
+  return store.widgetSettings;
 }
