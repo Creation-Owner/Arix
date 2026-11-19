@@ -41,6 +41,7 @@ import {
 import {
   addConnection,
   addCustomSection,
+  addKnowledgeNote,
   addRule,
   addScheduledTask,
   appendChatMessages,
@@ -48,12 +49,15 @@ import {
   deleteAudit,
   deleteConnection,
   deleteCustomSection,
+  deleteKnowledgeNote,
   deleteRule,
   deleteScheduledTask,
   exportPortableBrain,
   getActiveComputerRoot,
+  getBrainSettings,
   getConnectionToken,
   getCustomSections,
+  getKnowledgeNotes,
   getPublicState,
   getScheduledTasks,
   getWidgetSettings,
@@ -62,6 +66,7 @@ import {
   resetRulesToZero,
   saveAudit,
   setComputerRootOverride,
+  updateBrainSettings,
   updateConnection,
   updateCustomSection,
   updateIssueStatus,
@@ -70,6 +75,16 @@ import {
   updateScheduledTask,
   updateWidgetSettings,
 } from './server/store.ts';
+import {
+  buildOfflineCodeAudit,
+  detectLocalLlm,
+  isNetworkOfflineError,
+  queryLocalLlm,
+  retrieveRelevantKnowledge,
+  runOfflineKnowledgeEngine,
+  runOfflineVisitorAssistant,
+} from './server/offlineEngine.ts';
+import { OFFLINE_KNOWLEDGE_LIBRARY } from './server/offlineKnowledge.ts';
 import { buildArixWidgetScript } from './server/widgetScript.ts';
 import {
   editArixSourceFile,
@@ -85,11 +100,14 @@ import type {
   ArixActivityEvent,
   ArixSatelliteKey,
   AuditIssue,
+  BrainEngineMode,
   ChatAttachment,
   ChatMessage,
   ChatSource,
   ConnectedSite,
   ConnectedSiteType,
+  KnowledgeNote,
+  KnowledgeNoteCategory,
   PersonaSettings,
   ReasoningMode,
   RuleCategory,
@@ -112,7 +130,8 @@ function buildArixSystemInstruction(
   persona: PersonaSettings,
   activeRules: TaughtRule[],
   connections: ConnectedSite[],
-  computerRoot: string
+  computerRoot: string,
+  knowledgeNotes: KnowledgeNote[] = []
 ): string {
   const rulesBlock =
     activeRules.length > 0
@@ -139,6 +158,17 @@ function buildArixSystemInstruction(
           .join('\n')
       : 'No external websites or platforms connected yet.';
 
+  const vaultBlock =
+    knowledgeNotes.length > 0
+      ? knowledgeNotes
+          .slice(0, 12)
+          .map(
+            (n, idx) =>
+              `${idx + 1}. [${n.category}] ${n.title}: ${n.content.slice(0, 500)}`
+          )
+          .join('\n')
+      : 'No custom offline vault notes added yet.';
+
   return `You are Arix, the owner's personal autonomous AI assistant for coding, software architecture, website analysis, computer file/folder management, Telegram messaging, GitHub repositories, Cloudflare infrastructure, and any technical or operational task the owner requests.
 
 OWNER PROFILE & CORE SETTINGS FOR ARIX:
@@ -152,6 +182,9 @@ OWNER PROFILE & CORE SETTINGS FOR ARIX:
 
 EVERYTHING THE OWNER HAS TAUGHT YOU (ACTIVE RULES & SKILLS):
 ${rulesBlock}
+
+OWNER'S OFFLINE KNOWLEDGE VAULT (CUSTOM NOTES & DOCS):
+${vaultBlock}
 
 CONNECTED PLATFORMS (WEBSITES, GITHUB, CLOUDFLARE, TELEGRAM, APIS):
 ${connectionsBlock}
@@ -1449,6 +1482,172 @@ async function startServer() {
     res.json({ ...result, state: getPublicState() });
   });
 
+  // Offline Brain & Local LLM Status + Settings
+  app.get('/api/brain/status', async (_req, res) => {
+    const settings = getBrainSettings();
+    const state = getPublicState();
+    const localLlm = await detectLocalLlm(
+      settings.localLlmUrl,
+      settings.localLlmModel
+    );
+    res.json({
+      settings,
+      localLlm,
+      stats: {
+        customNotes: state.knowledgeNotes.length,
+        builtInGuides: OFFLINE_KNOWLEDGE_LIBRARY.length,
+        activeRules: state.rules.filter((r) => r.active).length,
+        savedAudits: state.audits.length,
+        indexedChatMessages: state.chatHistory.length,
+      },
+    });
+  });
+
+  app.put('/api/brain/settings', async (req, res) => {
+    const updated = updateBrainSettings(req.body ?? {});
+    const localLlm = await detectLocalLlm(
+      updated.localLlmUrl,
+      updated.localLlmModel
+    );
+    res.json({ settings: updated, localLlm });
+  });
+
+  app.get('/api/knowledge', (_req, res) => {
+    res.json({
+      notes: getKnowledgeNotes(),
+      builtInCount: OFFLINE_KNOWLEDGE_LIBRARY.length,
+      builtInTitles: OFFLINE_KNOWLEDGE_LIBRARY.map((k) => ({
+        id: k.id,
+        title: k.title,
+        category: k.category,
+        summary: k.summary,
+        tags: k.tags,
+      })),
+    });
+  });
+
+  app.post('/api/knowledge', (req, res) => {
+    const { title, content, category, tags, source, localFilePath } =
+      req.body ?? {};
+    const validCategories = new Set<KnowledgeNoteCategory>([
+      'coding',
+      'website',
+      'commands',
+      'personal',
+      'reference',
+    ]);
+
+    let finalTitle = String(title || '').trim();
+    let finalContent = String(content || '').trim();
+    let finalSource: 'manual' | 'file_import' | 'chat' =
+      source === 'file_import' || source === 'chat' ? source : 'manual';
+
+    if (localFilePath && String(localFilePath).trim()) {
+      try {
+        const rootDir = getActiveComputerRoot();
+        const file = readLocalFile(String(localFilePath).trim(), rootDir);
+        finalTitle = finalTitle || file.path;
+        finalContent = file.content;
+        finalSource = 'file_import';
+      } catch (err) {
+        res.status(400).json({
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Could not import local workspace file.',
+        });
+        return;
+      }
+    }
+
+    if (!finalTitle || !finalContent) {
+      res.status(400).json({ error: 'Title and content are required.' });
+      return;
+    }
+
+    const parsedTags = Array.isArray(tags)
+      ? tags.map((t) => String(t).trim()).filter(Boolean)
+      : typeof tags === 'string'
+        ? tags
+            .split(',')
+            .map((t) => t.trim())
+            .filter(Boolean)
+        : [];
+
+    const created = addKnowledgeNote({
+      title: finalTitle,
+      content: finalContent,
+      category: validCategories.has(category) ? category : 'reference',
+      tags: parsedTags,
+      source: finalSource,
+    });
+    res.status(201).json(created);
+  });
+
+  app.delete('/api/knowledge/:id', (req, res) => {
+    const ok = deleteKnowledgeNote(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: 'Knowledge note not found.' });
+      return;
+    }
+    res.json({ deleted: true });
+  });
+
+  app.post('/api/brain/offline-test', async (req, res) => {
+    try {
+      const prompt = String(req.body?.prompt || '').trim();
+      const useLocalLlm = req.body?.useLocalLlm === true;
+      if (!prompt) {
+        res.status(400).json({ error: 'Enter a test prompt first.' });
+        return;
+      }
+      const state = getPublicState();
+      const rootDir = getActiveComputerRoot();
+
+      if (useLocalLlm) {
+        const matches = retrieveRelevantKnowledge(prompt, state, { limit: 4 });
+        const ragContext = matches
+          .map((m) => `### ${m.doc.title} (${m.doc.sourceLabel})\n${m.doc.content}`)
+          .join('\n\n');
+        const sysPrompt = `${buildArixSystemInstruction(
+          state.persona,
+          state.rules.filter((r) => r.active),
+          state.connections,
+          rootDir,
+          state.knowledgeNotes
+        )}\n\nRELEVANT RETRIEVED OFFLINE KNOWLEDGE:\n${ragContext || 'None.'}`;
+        const localResp = await queryLocalLlm({
+          settings: state.brainSettings,
+          systemInstruction: sysPrompt,
+          history: [],
+          userMessage: prompt,
+        });
+        res.json({
+          reply: localResp.reply,
+          engineUsed: 'local_llm',
+          engineLabel: `${localResp.provider} (${localResp.modelUsed})`,
+        });
+        return;
+      }
+
+      const offlineRes = await runOfflineKnowledgeEngine({
+        message: prompt,
+        state,
+        rootDir,
+      });
+      res.json({
+        reply: offlineRes.reply,
+        engineUsed: offlineRes.engineUsed,
+        engineLabel: offlineRes.engineLabel,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error:
+          err instanceof Error ? err.message : 'Offline brain test failed.',
+      });
+    }
+  });
+
   // Self-Built Sections CRUD
   app.post('/api/sections', (req, res) => {
     const { title, navLabel, description, placement, htmlCode } = req.body ?? {};
@@ -1685,16 +1884,20 @@ async function startServer() {
         screenshotBase64,
         screenshotMimeType,
         connectionId,
+        clientOffline,
       } = req.body ?? {};
 
       const state = getPublicState();
       const activeRules = state.rules.filter((r) => r.active);
-      const ai = getGeminiClient();
+      const runOfflineAnalyze =
+        state.brainSettings.mode === 'offline' || clientOffline === true;
 
       emitArixActivity({
         phase: 'thinking',
         node: 'text',
-        title: 'Website Audit · Starting',
+        title: runOfflineAnalyze
+          ? 'Website Audit · Offline Engine'
+          : 'Website Audit · Starting',
         detail: `Preparing UX & error analysis (${inputType})...`,
       });
 
@@ -1773,17 +1976,20 @@ async function startServer() {
         targetLabel = targetLabel || scraped.signals.fetchedUrl || effectiveUrl;
 
         if (!htmlExcerpt || textExcerpt.length < 250) {
-          try {
-            const urlResp = await generateContentWithRetry(ai, {
-              model: ARIX_MODEL,
-              contents: `Inspect the webpage at ${targetLabel}. Describe its layout, navigation, headings, forms, CTAs, visible errors, loading/performance clues, and UX issues.`,
-              config: { tools: [{ urlContext: {} }] },
-            });
-            if (urlResp.text) {
-              urlContextSummary = urlResp.text.slice(0, 8000);
+          if (!runOfflineAnalyze) {
+            try {
+              const aiUrl = getGeminiClient();
+              const urlResp = await generateContentWithRetry(aiUrl, {
+                model: ARIX_MODEL,
+                contents: `Inspect the webpage at ${targetLabel}. Describe its layout, navigation, headings, forms, CTAs, visible errors, loading/performance clues, and UX issues.`,
+                config: { tools: [{ urlContext: {} }] },
+              });
+              if (urlResp.text) {
+                urlContextSummary = urlResp.text.slice(0, 8000);
+              }
+            } catch {
+              // Continue with scrape signals
             }
-          } catch {
-            // Continue with scrape signals
           }
         }
       } else if (inputType === 'code') {
@@ -1801,6 +2007,24 @@ async function startServer() {
         targetLabel = notes?.trim()
           ? `Code Audit: ${String(notes).trim().slice(0, 48)}`
           : 'Pasted Code Snippet';
+
+        if (runOfflineAnalyze) {
+          const offlineAudit = buildOfflineCodeAudit({
+            targetLabel,
+            inputType: 'code',
+            signals: parsed.signals,
+            appliedRulesUsed: activeRules.map((r) => r.title),
+          });
+          saveAudit(offlineAudit);
+          emitArixActivity({
+            phase: 'done',
+            node: 'text',
+            title: 'Offline Code Audit · Complete',
+            detail: `Ranked ${offlineAudit.issues.length} UX issues offline for ${offlineAudit.targetLabel}`,
+          });
+          res.json(offlineAudit);
+          return;
+        }
       } else if (inputType === 'screenshot') {
         if (!screenshotBase64) {
           res
@@ -1813,11 +2037,33 @@ async function startServer() {
           : 'Screenshot Visual Audit';
       }
 
+      if (runOfflineAnalyze && technicalSignals) {
+        const offlineAudit = buildOfflineCodeAudit({
+          targetLabel: targetLabel || 'Local Website Audit',
+          inputType: inputType === 'code' ? 'code' : 'url',
+          url: effectiveUrl || undefined,
+          signals: technicalSignals,
+          appliedRulesUsed: activeRules.map((r) => r.title),
+        });
+        saveAudit(offlineAudit);
+        emitArixActivity({
+          phase: 'done',
+          node: 'text',
+          title: 'Offline Audit · Complete',
+          detail: `Ranked ${offlineAudit.issues.length} UX issues offline`,
+        });
+        res.json(offlineAudit);
+        return;
+      }
+
+      const ai = getGeminiClient();
+
       const systemInstruction = buildArixSystemInstruction(
         state.persona,
         activeRules,
         state.connections,
-        state.computerRoot
+        state.computerRoot,
+        state.knowledgeNotes
       );
 
       const promptSections: string[] = [
@@ -2052,6 +2298,8 @@ async function startServer() {
         connectionId,
         attachments,
         reasoningMode: rawReasoningMode,
+        brainMode: rawBrainMode,
+        clientOffline,
       } = req.body ?? {};
       const cleanMessage = String(message || '').trim();
       const reasoningMode: ReasoningMode =
@@ -2168,8 +2416,14 @@ async function startServer() {
 
       const state = getPublicState();
       const activeRules = state.rules.filter((r) => r.active);
-      const ai = getGeminiClient();
       const rootDir = getActiveComputerRoot();
+      const effectiveBrainMode: BrainEngineMode =
+        rawBrainMode === 'auto' ||
+        rawBrainMode === 'offline' ||
+        rawBrainMode === 'local_llm' ||
+        rawBrainMode === 'cloud'
+          ? rawBrainMode
+          : state.brainSettings.mode;
 
       const targetAudit = auditId
         ? state.audits.find((a) => a.id === auditId)
@@ -2178,6 +2432,200 @@ async function startServer() {
         targetAudit && issueId
           ? targetAudit.issues.find((i) => i.id === issueId)
           : undefined;
+
+      const savedAttachmentsPreview: ChatAttachment[] = [
+        ...parsedBinaryAttachments.map((a) => a.attachment),
+        ...parsedTextAttachments.map((a) => a.attachment),
+      ];
+
+      const sendOfflineChatResponse = async (options: {
+        preferLocalLlm: boolean;
+        requireLocalLlm?: boolean;
+        offlineReason?: string;
+      }) => {
+        const appliedRulesUsed = activeRules.map((r) => r.title);
+        const promptWithAttachments =
+          parsedTextAttachments.length > 0
+            ? `${displayMessage}\n\n${parsedTextAttachments
+                .map((f) => `[File: ${f.attachment.name}]\n${f.textContent.slice(0, 6000)}`)
+                .join('\n\n')}`
+            : displayMessage;
+
+        if (options.preferLocalLlm) {
+          const localStatus = await detectLocalLlm(
+            state.brainSettings.localLlmUrl,
+            state.brainSettings.localLlmModel
+          );
+          if (localStatus.available && localStatus.activeModel) {
+            emitArixActivity({
+              phase: 'thinking',
+              node: 'core',
+              title: `Local PC LLM · ${localStatus.activeModel}`,
+              detail: 'Running offline neural model with your knowledge vault...',
+            });
+            const matches = retrieveRelevantKnowledge(displayMessage, state, {
+              limit: 4,
+            });
+            const ragContext = matches
+              .map(
+                (m) => `### ${m.doc.title} (${m.doc.sourceLabel})\n${m.doc.content}`
+              )
+              .join('\n\n');
+            const localSysPrompt = `${buildArixSystemInstruction(
+              state.persona,
+              activeRules,
+              state.connections,
+              rootDir,
+              state.knowledgeNotes
+            )}\n\nRELEVANT RETRIEVED OFFLINE KNOWLEDGE:\n${ragContext || 'None.'}`;
+            const localHistory = state.chatHistory.slice(-8).map((m) => ({
+              role: m.role === 'user' ? ('user' as const) : ('assistant' as const),
+              content: m.content.slice(0, 1500),
+            }));
+            const localResp = await queryLocalLlm({
+              settings: state.brainSettings,
+              systemInstruction: localSysPrompt,
+              history: localHistory,
+              userMessage: promptWithAttachments,
+            });
+            const replyText = options.offlineReason
+              ? `> **Offline Local LLM Active:** ${options.offlineReason}\n\n${localResp.reply}`
+              : localResp.reply;
+            const userMsg: ChatMessage = {
+              id: `msg-${Date.now()}-u`,
+              role: 'user',
+              content: displayMessage,
+              attachments:
+                savedAttachmentsPreview.length > 0
+                  ? savedAttachmentsPreview
+                  : undefined,
+              timestamp: new Date().toISOString(),
+              auditId: targetAudit?.id,
+              issueId: targetIssue?.id,
+              issueTitle: targetIssue?.title,
+            };
+            const arixMsg: ChatMessage = {
+              id: `msg-${Date.now()}-a`,
+              role: 'arix',
+              content: replyText,
+              reasoningMode,
+              engineUsed: 'local_llm',
+              engineLabel: `${localResp.provider} (${localResp.modelUsed})`,
+              timestamp: new Date().toISOString(),
+              auditId: targetAudit?.id,
+              issueId: targetIssue?.id,
+              issueTitle: targetIssue?.title,
+              appliedRulesUsed,
+              toolsInvoked: ['localLlmBrain'],
+            };
+            appendChatMessages([userMsg, arixMsg]);
+            emitArixActivity({
+              phase: 'done',
+              node: 'core',
+              title: `Local LLM · ${localResp.modelUsed}`,
+              detail: localResp.reply.split('\n')[0].slice(0, 120),
+            });
+            res.json({
+              userMessage: userMsg,
+              arixMessage: arixMsg,
+              newlyLearnedRules: [],
+              customSections: getCustomSections(),
+              scheduledTasks: getScheduledTasks(),
+              knowledgeNotes: getKnowledgeNotes(),
+            });
+            return;
+          }
+
+          if (options.requireLocalLlm) {
+            res.status(503).json({
+              error:
+                localStatus.error ||
+                `Local LLM server not reachable at ${state.brainSettings.localLlmUrl}. Start Ollama on your PC or switch Brain Mode to "100% Offline Knowledge" or "Auto Hybrid".`,
+            });
+            return;
+          }
+        }
+
+        emitArixActivity({
+          phase: 'thinking',
+          node: 'text',
+          title: 'Arix Offline Brain · Searching Knowledge',
+          detail: 'Running locally using your Knowledge Vault, Rules & PC tools...',
+        });
+        const offlineResult = await runOfflineKnowledgeEngine({
+          message: promptWithAttachments,
+          state,
+          rootDir,
+          offlineReason: options.offlineReason,
+        });
+        const userMsg: ChatMessage = {
+          id: `msg-${Date.now()}-u`,
+          role: 'user',
+          content: displayMessage,
+          attachments:
+            savedAttachmentsPreview.length > 0
+              ? savedAttachmentsPreview
+              : undefined,
+          timestamp: new Date().toISOString(),
+          auditId: targetAudit?.id,
+          issueId: targetIssue?.id,
+          issueTitle: targetIssue?.title,
+        };
+        const arixMsg: ChatMessage = {
+          id: `msg-${Date.now()}-a`,
+          role: 'arix',
+          content: offlineResult.reply,
+          reasoningMode,
+          engineUsed: offlineResult.engineUsed,
+          engineLabel: offlineResult.engineLabel,
+          timestamp: new Date().toISOString(),
+          auditId: targetAudit?.id,
+          issueId: targetIssue?.id,
+          issueTitle: targetIssue?.title,
+          newlyLearnedRules:
+            offlineResult.newlyLearnedRules.length > 0
+              ? offlineResult.newlyLearnedRules
+              : undefined,
+          appliedRulesUsed,
+          toolsInvoked: offlineResult.toolsInvoked,
+        };
+        appendChatMessages([userMsg, arixMsg]);
+        emitArixActivity({
+          phase: 'done',
+          node: 'text',
+          title: offlineResult.engineLabel,
+          detail: offlineResult.reply.split('\n')[0].slice(0, 120),
+        });
+        res.json({
+          userMessage: userMsg,
+          arixMessage: arixMsg,
+          newlyLearnedRules: offlineResult.newlyLearnedRules,
+          customSections: getCustomSections(),
+          scheduledTasks: getScheduledTasks(),
+          knowledgeNotes: getKnowledgeNotes(),
+        });
+      };
+
+      if (effectiveBrainMode === 'offline') {
+        await sendOfflineChatResponse({ preferLocalLlm: false });
+        return;
+      }
+      if (effectiveBrainMode === 'local_llm') {
+        await sendOfflineChatResponse({
+          preferLocalLlm: true,
+          requireLocalLlm: true,
+        });
+        return;
+      }
+      if (effectiveBrainMode === 'auto' && clientOffline === true) {
+        await sendOfflineChatResponse({
+          preferLocalLlm: true,
+          offlineReason: 'Device is offline — answering directly from your local Arix brain.',
+        });
+        return;
+      }
+
+      const ai = getGeminiClient();
       const targetConnection = connectionId
         ? state.connections.find((c) => c.id === connectionId)
         : undefined;
@@ -2250,7 +2698,8 @@ async function startServer() {
         state.persona,
         activeRules,
         state.connections,
-        rootDir
+        rootDir,
+        state.knowledgeNotes
       )}
 
 AVAILABLE LIVE TOOLS:
@@ -3317,6 +3766,8 @@ ${
         sources: collectedSources.length > 0 ? collectedSources : undefined,
         thinkingSummary,
         reasoningMode,
+        engineUsed: 'gemini',
+        engineLabel: 'Arix Cloud Brain',
         timestamp: new Date().toISOString(),
         auditId: targetAudit?.id,
         issueId: targetIssue?.id,
@@ -3344,8 +3795,98 @@ ${
         newlyLearnedRules,
         customSections: getCustomSections(),
         scheduledTasks: getScheduledTasks(),
+        knowledgeNotes: getKnowledgeNotes(),
       });
     } catch (err) {
+      // Automatic offline failover ONLY when network is unreachable in Auto Hybrid mode
+      const currentSettings = getBrainSettings();
+      const requestedMode = req.body?.brainMode || currentSettings.mode;
+      if (requestedMode === 'auto' && isNetworkOfflineError(err)) {
+        try {
+          const state = getPublicState();
+          const rootDir = getActiveComputerRoot();
+          const fallbackPrompt = String(req.body?.message || '').trim() || 'Status';
+          const localStatus = await detectLocalLlm(
+            state.brainSettings.localLlmUrl,
+            state.brainSettings.localLlmModel
+          );
+          let replyText = '';
+          let engineUsed: 'gemini' | 'local_llm' | 'offline_knowledge' = 'offline_knowledge';
+          let engineLabel = 'Arix Offline Knowledge Brain';
+          let toolsUsed: string[] = ['offlineKnowledgeBrain'];
+          let learned: TaughtRule[] = [];
+
+          if (localStatus.available && localStatus.activeModel) {
+            const localResp = await queryLocalLlm({
+              settings: state.brainSettings,
+              systemInstruction: buildArixSystemInstruction(
+                state.persona,
+                state.rules.filter((r) => r.active),
+                state.connections,
+                rootDir,
+                state.knowledgeNotes
+              ),
+              history: state.chatHistory.slice(-6).map((m) => ({
+                role: m.role === 'user' ? ('user' as const) : ('assistant' as const),
+                content: m.content.slice(0, 1200),
+              })),
+              userMessage: fallbackPrompt,
+            });
+            replyText = `> **Auto-Switched to Local Offline LLM:** Internet connection unreachable.\n\n${localResp.reply}`;
+            engineUsed = 'local_llm';
+            engineLabel = `${localResp.provider} (${localResp.modelUsed})`;
+            toolsUsed = ['localLlmBrain'];
+          } else {
+            const offlineRes = await runOfflineKnowledgeEngine({
+              message: fallbackPrompt,
+              state,
+              rootDir,
+              offlineReason: 'Internet unreachable — switched automatically to Arix Offline Knowledge Brain.',
+            });
+            replyText = offlineRes.reply;
+            engineUsed = offlineRes.engineUsed;
+            engineLabel = offlineRes.engineLabel;
+            toolsUsed = offlineRes.toolsInvoked;
+            learned = offlineRes.newlyLearnedRules;
+          }
+
+          const userMsg: ChatMessage = {
+            id: `msg-${Date.now()}-u`,
+            role: 'user',
+            content: fallbackPrompt,
+            timestamp: new Date().toISOString(),
+          };
+          const arixMsg: ChatMessage = {
+            id: `msg-${Date.now()}-a`,
+            role: 'arix',
+            content: replyText,
+            engineUsed,
+            engineLabel,
+            timestamp: new Date().toISOString(),
+            newlyLearnedRules: learned.length > 0 ? learned : undefined,
+            toolsInvoked: toolsUsed,
+          };
+          appendChatMessages([userMsg, arixMsg]);
+          emitArixActivity({
+            phase: 'done',
+            node: 'text',
+            title: engineLabel,
+            detail: 'Answered locally while offline',
+          });
+          res.json({
+            userMessage: userMsg,
+            arixMessage: arixMsg,
+            newlyLearnedRules: learned,
+            customSections: getCustomSections(),
+            scheduledTasks: getScheduledTasks(),
+            knowledgeNotes: getKnowledgeNotes(),
+          });
+          return;
+        } catch {
+          // Fall through to standard error reporting
+        }
+      }
+
       const formatted = formatGeminiError(err);
       emitArixActivity({
         phase: 'error',
@@ -3792,6 +4333,37 @@ ${pageTitle ? `Title: ${pageTitle}` : ''} ${pageUrl ? `URL: ${pageUrl}` : ''}`;
           parts: [{ text: item.content.slice(0, 1200) }],
         }));
 
+      const brainCfg = state.brainSettings;
+      if (brainCfg.mode === 'offline') {
+        const offlineReply = runOfflineVisitorAssistant(rawMessage, state);
+        res.json({
+          reply: offlineReply,
+          assistantName: cfg.assistantName,
+          engineUsed: 'offline_knowledge',
+        });
+        return;
+      }
+
+      if (brainCfg.mode === 'local_llm') {
+        const localResp = await queryLocalLlm({
+          settings: brainCfg,
+          systemInstruction: visitorSystemInstruction,
+          history: historyTurns.map(
+            (h: { role: 'user' | 'model'; parts: Array<{ text: string }> }) => ({
+              role: h.role === 'user' ? ('user' as const) : ('assistant' as const),
+              content: h.parts[0]?.text || '',
+            })
+          ),
+          userMessage: rawMessage,
+        });
+        res.json({
+          reply: localResp.reply,
+          assistantName: cfg.assistantName,
+          engineUsed: 'local_llm',
+        });
+        return;
+      }
+
       const ai = getGeminiClient();
       emitArixActivity({
         phase: 'tool_start',
@@ -3832,8 +4404,19 @@ ${pageTitle ? `Title: ${pageTitle}` : ''} ${pageUrl ? `URL: ${pageUrl}` : ''}`;
       res.json({
         reply,
         assistantName: cfg.assistantName,
+        engineUsed: 'gemini',
       });
     } catch (err) {
+      if (getBrainSettings().mode === 'auto' && isNetworkOfflineError(err)) {
+        const state = getPublicState();
+        const offlineReply = runOfflineVisitorAssistant(rawMessage, state);
+        res.json({
+          reply: offlineReply,
+          assistantName: cfg.assistantName,
+          engineUsed: 'offline_knowledge',
+        });
+        return;
+      }
       const formatted = formatGeminiError(err);
       emitArixActivity({
         phase: 'error',
@@ -4066,10 +4649,41 @@ export class ErrorOverlay extends HTMLElement {}
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
+    const baseDir = import.meta.dirname || process.cwd();
+    const candidateDist = path.resolve(baseDir, 'dist');
+    const distDir = fs.existsSync(path.join(candidateDist, 'index.html'))
+      ? candidateDist
+      : path.resolve(process.cwd(), 'dist');
+
+    app.use(
+      express.static(distDir, {
+        setHeaders: (res, filePath) => {
+          if (
+            filePath.endsWith('index.html') ||
+            filePath.endsWith('sw.js') ||
+            filePath.endsWith('manifest.webmanifest')
+          ) {
+            res.setHeader('Cache-Control', 'no-store');
+          }
+        },
+      })
+    );
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/assets/')) {
+        res.status(404).end();
+        return;
+      }
+      const indexFile = path.join(distDir, 'index.html');
+      if (!fs.existsSync(indexFile)) {
+        res
+          .status(500)
+          .send(
+            'Arix frontend build (dist/index.html) is missing. Run "npm run build" and restart.'
+          );
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.sendFile(indexFile);
     });
   }
 

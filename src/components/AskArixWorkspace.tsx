@@ -15,9 +15,11 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Cpu,
   Download,
   ExternalLink,
   FileText,
+  HardDrive,
   Loader2,
   Mic,
   MicOff,
@@ -62,6 +64,7 @@ import {
 } from '../utils/voiceRecorder';
 import type {
   ArixVoiceName,
+  BrainEngineMode,
   ChatAttachment,
   ChatMessage,
   ConnectedSite,
@@ -78,12 +81,14 @@ interface AskArixWorkspaceProps {
   selectedConnectionId: string | null;
   sending: boolean;
   reasoningMode: ReasoningMode;
+  brainMode: BrainEngineMode;
   voiceName: ArixVoiceName;
   autoSpeak: boolean;
   activeRuleCount: number;
   draftPrompt?: string | null;
   onConsumeDraftPrompt?: () => void;
   onChangeReasoningMode: (mode: ReasoningMode) => void;
+  onChangeBrainMode: (mode: BrainEngineMode) => Promise<void>;
   onUpdateVoiceSettings: (patch: {
     voiceName?: ArixVoiceName;
     autoSpeak?: boolean;
@@ -100,6 +105,7 @@ interface AskArixWorkspaceProps {
   onCancelSending?: () => void;
   onClearChat: () => Promise<void>;
   onGoToTeach: () => void;
+  onGoToOfflineBrain: () => void;
 }
 
 function renderFormattedReply(content: string) {
@@ -145,18 +151,21 @@ export function AskArixWorkspace({
   selectedConnectionId,
   sending,
   reasoningMode,
+  brainMode,
   voiceName,
   autoSpeak,
   activeRuleCount,
   draftPrompt,
   onConsumeDraftPrompt,
   onChangeReasoningMode,
+  onChangeBrainMode,
   onUpdateVoiceSettings,
   onSelectContext,
   onSendMessage,
   onCancelSending,
   onClearChat,
   onGoToTeach,
+  onGoToOfflineBrain,
 }: AskArixWorkspaceProps) {
   const [input, setInput] = useState('');
   const [pendingImages, setPendingImages] = useState<ChatAttachment[]>([]);
@@ -413,6 +422,38 @@ export function AskArixWorkspace({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex items-center rounded-lg border border-slate-700 bg-[#060E1F] p-0.5 gap-0.5">
+            <select
+              aria-label="Select Arix Brain Engine Mode"
+              value={brainMode}
+              onChange={(e) =>
+                void onChangeBrainMode(e.target.value as BrainEngineMode)
+              }
+              title="Choose how Arix thinks: Auto Hybrid, 100% Offline Knowledge, Local PC LLM (Ollama), or Cloud Only"
+              className="px-2 py-1 text-xs bg-transparent text-sky-300 font-medium focus:outline-none cursor-pointer"
+            >
+              <option value="auto" className="bg-[#081124] text-slate-200">
+                Brain: Auto Hybrid
+              </option>
+              <option value="offline" className="bg-[#081124] text-slate-200">
+                Brain: 100% Offline
+              </option>
+              <option value="local_llm" className="bg-[#081124] text-slate-200">
+                Brain: Local PC LLM
+              </option>
+              <option value="cloud" className="bg-[#081124] text-slate-200">
+                Brain: Cloud Only
+              </option>
+            </select>
+            <button
+              type="button"
+              onClick={onGoToOfflineBrain}
+              title="Open Offline Brain & Knowledge Vault"
+              className="p-1 text-slate-400 hover:text-sky-400 rounded cursor-pointer"
+            >
+              <HardDrive className="w-3.5 h-3.5" />
+            </button>
+          </div>
           <div
             role="group"
             aria-label="Arix response speed and reasoning depth"
@@ -761,6 +802,18 @@ export function AskArixWorkspace({
                       : 'bg-[#081124] border border-slate-800 text-slate-100'
                   }`}
                 >
+                  {msg.role === 'arix' && msg.engineLabel && (
+                    <div className="mb-2 flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
+                      {msg.engineUsed === 'local_llm' ? (
+                        <Cpu className="w-3 h-3 text-emerald-400" />
+                      ) : msg.engineUsed === 'offline_knowledge' ? (
+                        <HardDrive className="w-3 h-3 text-amber-400" />
+                      ) : (
+                        <Sparkles className="w-3 h-3 text-sky-400" />
+                      )}
+                      <span>{msg.engineLabel}</span>
+                    </div>
+                  )}
                   {msg.issueTitle && (
                     <div
                       className={`text-xs mb-1.5 ${

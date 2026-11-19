@@ -3,9 +3,12 @@ import path from 'path';
 import { resolveComputerRoot } from './computer.ts';
 import type {
   ArixStatePayload,
+  BrainSettings,
   ChatMessage,
   ConnectedSite,
   CustomSection,
+  KnowledgeNote,
+  KnowledgeNoteCategory,
   PersonaSettings,
   RuleCategory,
   ScheduledTask,
@@ -30,6 +33,8 @@ interface PersistedArixStore {
   customSections: CustomSection[];
   scheduledTasks: ScheduledTask[];
   widgetSettings: WebsiteWidgetSettings;
+  knowledgeNotes: KnowledgeNote[];
+  brainSettings: BrainSettings;
   computerRootOverride?: string;
 }
 
@@ -50,6 +55,15 @@ function createDefaultWidgetSettings(): WebsiteWidgetSettings {
     siteKnowledge: '',
     publicKey: generatePublicWidgetKey(),
     requirePublicKey: false,
+  };
+}
+
+function createDefaultBrainSettings(): BrainSettings {
+  return {
+    mode: 'auto',
+    localLlmUrl: 'http://127.0.0.1:11434',
+    localLlmModel: '',
+    autoIndexChat: true,
   };
 }
 
@@ -135,6 +149,8 @@ function createInitialStore(): PersistedArixStore {
         customSections: [],
         scheduledTasks: [],
         widgetSettings: createDefaultWidgetSettings(),
+        knowledgeNotes: [],
+        brainSettings: createDefaultBrainSettings(),
       };
     } catch {
       // Fallback to fresh store
@@ -150,6 +166,8 @@ function createInitialStore(): PersistedArixStore {
     customSections: [],
     scheduledTasks: [],
     widgetSettings: createDefaultWidgetSettings(),
+    knowledgeNotes: [],
+    brainSettings: createDefaultBrainSettings(),
   };
 }
 
@@ -166,6 +184,7 @@ function ensureStore(): PersistedArixStore {
     const raw = fs.readFileSync(STORE_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<PersistedArixStore>;
     const defaults = createDefaultWidgetSettings();
+    const brainDefaults = createDefaultBrainSettings();
     return {
       rules: Array.isArray(parsed.rules) ? parsed.rules : DEFAULT_RULES,
       persona: { ...DEFAULT_PERSONA, ...(parsed.persona || {}) },
@@ -183,6 +202,13 @@ function ensureStore(): PersistedArixStore {
         ...defaults,
         ...(parsed.widgetSettings || {}),
         publicKey: parsed.widgetSettings?.publicKey || defaults.publicKey,
+      },
+      knowledgeNotes: Array.isArray(parsed.knowledgeNotes)
+        ? parsed.knowledgeNotes
+        : [],
+      brainSettings: {
+        ...brainDefaults,
+        ...(parsed.brainSettings || {}),
       },
       computerRootOverride: parsed.computerRootOverride,
     };
@@ -232,6 +258,8 @@ export function getPublicState(): ArixStatePayload {
     customSections: store.customSections,
     scheduledTasks: store.scheduledTasks,
     widgetSettings: store.widgetSettings,
+    knowledgeNotes: store.knowledgeNotes,
+    brainSettings: store.brainSettings,
     computerRoot: resolveComputerRoot(store.computerRootOverride),
   };
 }
@@ -457,9 +485,11 @@ export function exportPortableBrain() {
   return {
     exportedAt: new Date().toISOString(),
     aiName: 'Arix',
-    version: 2,
+    version: 3,
     persona: state.persona,
     rules: state.rules,
+    knowledgeNotes: state.knowledgeNotes,
+    brainSettings: state.brainSettings,
     customSections: state.customSections,
     connections: state.connections.map((c) => ({
       name: c.name,
@@ -474,8 +504,9 @@ export function exportPortableBrain() {
 export function importPortableBrain(payload: {
   persona?: Partial<PersonaSettings>;
   rules?: TaughtRule[];
+  knowledgeNotes?: KnowledgeNote[];
   customSections?: CustomSection[];
-}): { importedRules: number; importedSections: number } {
+}): { importedRules: number; importedSections: number; importedNotes: number } {
   const store = ensureStore();
   if (payload.persona) {
     store.persona = { ...store.persona, ...payload.persona };
@@ -535,8 +566,44 @@ export function importPortableBrain(payload: {
     }
   }
 
+  let importedNotes = 0;
+  if (Array.isArray(payload.knowledgeNotes)) {
+    const existingNoteTitles = new Set(
+      store.knowledgeNotes.map((n) => n.title.toLowerCase())
+    );
+    const validCats = new Set<KnowledgeNoteCategory>([
+      'coding',
+      'website',
+      'commands',
+      'personal',
+      'reference',
+    ]);
+    for (const n of payload.knowledgeNotes) {
+      if (n.title && n.content && !existingNoteTitles.has(n.title.toLowerCase())) {
+        const now = new Date().toISOString();
+        store.knowledgeNotes.unshift({
+          id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          title: String(n.title).slice(0, 140),
+          content: String(n.content).slice(0, 20000),
+          category: validCats.has(n.category) ? n.category : 'reference',
+          tags: Array.isArray(n.tags)
+            ? n.tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 12)
+            : [],
+          source:
+            n.source === 'file_import' || n.source === 'chat'
+              ? n.source
+              : 'manual',
+          createdAt: n.createdAt || now,
+          updatedAt: n.updatedAt || now,
+        });
+        existingNoteTitles.add(n.title.toLowerCase());
+        importedNotes++;
+      }
+    }
+  }
+
   writeStore(store);
-  return { importedRules, importedSections };
+  return { importedRules, importedSections, importedNotes };
 }
 
 export function getScheduledTasks(): ScheduledTask[] {
@@ -608,4 +675,88 @@ export function regenerateWidgetKey(): WebsiteWidgetSettings {
   };
   writeStore(store);
   return store.widgetSettings;
+}
+
+export function getKnowledgeNotes(): KnowledgeNote[] {
+  return ensureStore().knowledgeNotes;
+}
+
+export function addKnowledgeNote(
+  input: Omit<KnowledgeNote, 'id' | 'createdAt' | 'updatedAt'>
+): KnowledgeNote {
+  const store = ensureStore();
+  const now = new Date().toISOString();
+  const note: KnowledgeNote = {
+    ...input,
+    id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    title: input.title.trim().slice(0, 140),
+    content: input.content.trim().slice(0, 25000),
+    tags: input.tags
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean)
+      .slice(0, 14),
+    createdAt: now,
+    updatedAt: now,
+  };
+  store.knowledgeNotes = [note, ...store.knowledgeNotes];
+  writeStore(store);
+  return note;
+}
+
+export function updateKnowledgeNote(
+  id: string,
+  patch: Partial<Omit<KnowledgeNote, 'id' | 'createdAt'>>
+): KnowledgeNote | null {
+  const store = ensureStore();
+  const idx = store.knowledgeNotes.findIndex((n) => n.id === id);
+  if (idx === -1) return null;
+  store.knowledgeNotes[idx] = {
+    ...store.knowledgeNotes[idx],
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  writeStore(store);
+  return store.knowledgeNotes[idx];
+}
+
+export function deleteKnowledgeNote(id: string): boolean {
+  const store = ensureStore();
+  const before = store.knowledgeNotes.length;
+  store.knowledgeNotes = store.knowledgeNotes.filter((n) => n.id !== id);
+  if (store.knowledgeNotes.length === before) return false;
+  writeStore(store);
+  return true;
+}
+
+export function getBrainSettings(): BrainSettings {
+  return ensureStore().brainSettings;
+}
+
+export function updateBrainSettings(
+  patch: Partial<BrainSettings>
+): BrainSettings {
+  const store = ensureStore();
+  const nextMode =
+    patch.mode === 'auto' ||
+    patch.mode === 'offline' ||
+    patch.mode === 'local_llm' ||
+    patch.mode === 'cloud'
+      ? patch.mode
+      : store.brainSettings.mode;
+
+  store.brainSettings = {
+    ...store.brainSettings,
+    ...patch,
+    mode: nextMode,
+    localLlmUrl:
+      typeof patch.localLlmUrl === 'string' && patch.localLlmUrl.trim()
+        ? patch.localLlmUrl.trim().replace(/\/+$/, '')
+        : store.brainSettings.localLlmUrl || 'http://127.0.0.1:11434',
+    localLlmModel:
+      typeof patch.localLlmModel === 'string'
+        ? patch.localLlmModel.trim()
+        : store.brainSettings.localLlmModel,
+  };
+  writeStore(store);
+  return store.brainSettings;
 }

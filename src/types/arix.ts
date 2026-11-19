@@ -149,6 +149,44 @@ export interface ChatSource {
   url: string;
 }
 
+export type BrainEngineMode = 'auto' | 'offline' | 'local_llm' | 'cloud';
+
+export type ChatEngineUsed = 'gemini' | 'local_llm' | 'offline_knowledge';
+
+export type KnowledgeNoteCategory =
+  | 'coding'
+  | 'website'
+  | 'commands'
+  | 'personal'
+  | 'reference';
+
+export interface KnowledgeNote {
+  id: string;
+  title: string;
+  content: string;
+  category: KnowledgeNoteCategory;
+  tags: string[];
+  source: 'manual' | 'file_import' | 'chat';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BrainSettings {
+  mode: BrainEngineMode;
+  localLlmUrl: string;
+  localLlmModel: string;
+  autoIndexChat: boolean;
+}
+
+export interface LocalLlmStatus {
+  available: boolean;
+  provider: 'ollama' | 'openai_compatible' | 'none';
+  endpoint: string;
+  models: string[];
+  activeModel: string;
+  error?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'arix';
@@ -157,6 +195,8 @@ export interface ChatMessage {
   sources?: ChatSource[];
   thinkingSummary?: string;
   reasoningMode?: ReasoningMode;
+  engineUsed?: ChatEngineUsed;
+  engineLabel?: string;
   timestamp: string;
   auditId?: string;
   issueId?: string;
@@ -219,6 +259,8 @@ export interface ArixStatePayload {
   customSections: CustomSection[];
   scheduledTasks: ScheduledTask[];
   widgetSettings: WebsiteWidgetSettings;
+  knowledgeNotes: KnowledgeNote[];
+  brainSettings: BrainSettings;
   computerRoot: string;
 }
 

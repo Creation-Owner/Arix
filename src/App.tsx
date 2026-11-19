@@ -5,6 +5,7 @@ import {
   CalendarClock,
   Clock,
   FolderOpen,
+  HardDrive,
   Home,
   Link2,
   Menu,
@@ -26,6 +27,7 @@ import {
   OfflineIndicator,
   PWAInstallButton,
 } from './components/PWAInstallButton';
+import { OfflineBrainWorkspace } from './components/OfflineBrainWorkspace';
 import { SchedulesWorkspace } from './components/SchedulesWorkspace';
 import { SelfSectionFrame } from './components/SelfSectionFrame';
 import { TeachArixWorkspace } from './components/TeachArixWorkspace';
@@ -36,11 +38,16 @@ import type {
   ArixSatelliteKey,
   ArixStatePayload,
   ArixVoiceName,
+  BrainEngineMode,
+  BrainSettings,
   ChatAttachment,
   ChatMessage,
   ConnectedSite,
   ConnectedSiteType,
   CustomSection,
+  KnowledgeNote,
+  KnowledgeNoteCategory,
+  LocalLlmStatus,
   PersonaSettings,
   ReasoningMode,
   RuleCategory,
@@ -55,6 +62,7 @@ import { playArixSpeech } from './utils/voicePlayer';
 
 type BuiltInTab =
   | 'home'
+  | 'brain'
   | 'connections'
   | 'widget'
   | 'computer'
@@ -68,6 +76,7 @@ type WorkspaceTab = BuiltInTab | `section:${string}`;
 
 const TAB_META: Record<BuiltInTab, { label: string }> = {
   home: { label: 'Main Page' },
+  brain: { label: 'Offline Brain' },
   connections: { label: 'Connect Sites' },
   widget: { label: 'Website Widget' },
   computer: { label: 'Computer Files' },
@@ -115,6 +124,13 @@ export default function App() {
     publicKey: '',
     requirePublicKey: false,
   });
+  const [knowledgeNotes, setKnowledgeNotes] = useState<KnowledgeNote[]>([]);
+  const [brainSettings, setBrainSettings] = useState<BrainSettings>({
+    mode: 'auto',
+    localLlmUrl: 'http://127.0.0.1:11434',
+    localLlmModel: '',
+    autoIndexChat: true,
+  });
 
   const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
   const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
@@ -160,6 +176,8 @@ export default function App() {
         setCustomSections(data.customSections || []);
         setScheduledTasks(data.scheduledTasks || []);
         if (data.widgetSettings) setWidgetSettings(data.widgetSettings);
+        setKnowledgeNotes(data.knowledgeNotes || []);
+        if (data.brainSettings) setBrainSettings(data.brainSettings);
         setComputerRoot(data.computerRoot || '');
         if (data.audits.length > 0) {
           setSelectedAuditId(data.audits[0].id);
@@ -287,7 +305,11 @@ export default function App() {
       const res = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          ...payload,
+          clientOffline:
+            typeof navigator !== 'undefined' && navigator.onLine === false,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -599,6 +621,9 @@ export default function App() {
           message: cleanText,
           attachments: validAttachments,
           reasoningMode: activeMode,
+          brainMode: brainSettings.mode,
+          clientOffline:
+            typeof navigator !== 'undefined' && navigator.onLine === false,
           auditId: selectedAuditId,
           issueId: focusedIssueId,
           connectionId: selectedConnectionId,
@@ -632,6 +657,9 @@ export default function App() {
       }
       if (Array.isArray(data.scheduledTasks)) {
         setScheduledTasks(data.scheduledTasks as ScheduledTask[]);
+      }
+      if (Array.isArray(data.knowledgeNotes)) {
+        setKnowledgeNotes(data.knowledgeNotes as KnowledgeNote[]);
       }
     } catch (err) {
       const isAbort = err instanceof DOMException && err.name === 'AbortError';
@@ -728,6 +756,48 @@ export default function App() {
     setWidgetSettings(data);
   };
 
+  const handleSaveBrainSettings = async (
+    patch: Partial<BrainSettings>
+  ): Promise<{ settings: BrainSettings; localLlm: LocalLlmStatus }> => {
+    const res = await fetch('/api/brain/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save brain settings.');
+    setBrainSettings(data.settings as BrainSettings);
+    return data as { settings: BrainSettings; localLlm: LocalLlmStatus };
+  };
+
+  const handleChangeBrainMode = async (mode: BrainEngineMode) => {
+    await handleSaveBrainSettings({ mode });
+  };
+
+  const handleAddKnowledgeNote = async (input: {
+    title?: string;
+    content?: string;
+    category: KnowledgeNoteCategory;
+    tags: string[];
+    localFilePath?: string;
+    source?: 'manual' | 'file_import';
+  }) => {
+    const res = await fetch('/api/knowledge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save knowledge note.');
+    setKnowledgeNotes((prev) => [data as KnowledgeNote, ...prev]);
+  };
+
+  const handleDeleteKnowledgeNote = async (id: string) => {
+    const res = await fetch(`/api/knowledge/${id}`, { method: 'DELETE' });
+    if (!res.ok) return;
+    setKnowledgeNotes((prev) => prev.filter((n) => n.id !== id));
+  };
+
   const navItems: Array<{
     id: BuiltInTab;
     label: string;
@@ -735,6 +805,12 @@ export default function App() {
     count?: number;
   }> = [
     { id: 'home', label: 'Main Page', icon: Home },
+    {
+      id: 'brain',
+      label: 'Offline Brain',
+      icon: HardDrive,
+      count: knowledgeNotes.length,
+    },
     {
       id: 'connections',
       label: 'Connect Sites',
@@ -1059,6 +1135,19 @@ export default function App() {
                 />
               )}
 
+              {activeTab === 'brain' && (
+                <OfflineBrainWorkspace
+                  brainSettings={brainSettings}
+                  knowledgeNotes={knowledgeNotes}
+                  activeRuleCount={activeRules.length}
+                  auditCount={audits.length}
+                  chatCount={chatHistory.length}
+                  onSaveBrainSettings={handleSaveBrainSettings}
+                  onAddKnowledgeNote={handleAddKnowledgeNote}
+                  onDeleteKnowledgeNote={handleDeleteKnowledgeNote}
+                />
+              )}
+
               {activeTab === 'connections' && (
                 <ConnectionsWorkspace
                   connections={connections}
@@ -1125,12 +1214,14 @@ export default function App() {
                   selectedConnectionId={selectedConnectionId}
                   sending={sendingChat}
                   reasoningMode={reasoningMode}
+                  brainMode={brainSettings.mode}
                   voiceName={persona.voiceName || 'Kore'}
                   autoSpeak={Boolean(persona.autoSpeak)}
                   activeRuleCount={activeRules.length}
                   draftPrompt={draftChatPrompt}
                   onConsumeDraftPrompt={() => setDraftChatPrompt(null)}
                   onChangeReasoningMode={setReasoningMode}
+                  onChangeBrainMode={handleChangeBrainMode}
                   onUpdateVoiceSettings={handleUpdateVoiceSettings}
                   onSelectContext={(auditId, issueId, connId) => {
                     setSelectedAuditId(auditId);
@@ -1141,6 +1232,7 @@ export default function App() {
                   onCancelSending={handleCancelChat}
                   onClearChat={handleClearChat}
                   onGoToTeach={() => switchTab('teach')}
+                  onGoToOfflineBrain={() => switchTab('brain')}
                 />
               )}
 
